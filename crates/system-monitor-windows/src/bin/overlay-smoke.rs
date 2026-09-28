@@ -16,6 +16,7 @@ mod windows_smoke {
     const INPUT_MOUSE: u32 = 0;
     const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
     const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
+    const SM_CYMENU: i32 = 15;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     #[link(name = "user32")]
@@ -29,6 +30,7 @@ mod windows_smoke {
         fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
         fn GetDC(hwnd: Hwnd) -> Hwnd;
         fn ReleaseDC(hwnd: Hwnd, dc: Hwnd) -> i32;
+        fn GetSystemMetrics(index: i32) -> i32;
     }
 
     #[link(name = "gdi32")]
@@ -37,6 +39,7 @@ mod windows_smoke {
     }
 
     #[repr(C)]
+    #[derive(Clone, Copy)]
     struct Rect {
         left: i32,
         top: i32,
@@ -65,6 +68,28 @@ mod windows_smoke {
     struct Input {
         kind: u32,
         data: InputData,
+    }
+
+    fn send_mouse(flags: u32) -> Result<(), String> {
+        let event = Input {
+            kind: INPUT_MOUSE,
+            data: InputData {
+                mouse: MouseInput {
+                    dx: 0,
+                    dy: 0,
+                    mouse_data: 0,
+                    flags,
+                    time: 0,
+                    extra_info: 0,
+                },
+            },
+        };
+        let sent = unsafe { SendInput(1, &event, std::mem::size_of::<Input>() as i32) };
+        if sent == 1 {
+            Ok(())
+        } else {
+            Err(format!("SendInput inserted {sent}/1 mouse events"))
+        }
     }
 
     fn click_left() -> Result<(), String> {
@@ -112,10 +137,94 @@ mod windows_smoke {
         }
     }
 
+    fn click_context_item(hwnd: Hwnd, item_index: i32) -> Result<(), String> {
+        let mut overlay = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if unsafe { GetWindowRect(hwnd, &mut overlay) } == 0
+            || unsafe {
+                SetCursorPos(
+                    (overlay.left + overlay.right) / 2,
+                    (overlay.top + overlay.bottom) / 2,
+                )
+            } == 0
+            || unsafe { PostMessageW(hwnd, WM_RBUTTONUP, 0, 0) } == 0
+        {
+            return Err("could not open overlay context menu".into());
+        }
+        let menu_class: Vec<u16> = "#32768\0".encode_utf16().collect();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let menu = loop {
+            let found = unsafe { FindWindowW(menu_class.as_ptr(), std::ptr::null()) };
+            if !found.is_null() {
+                break found;
+            }
+            if Instant::now() >= deadline {
+                return Err("right-click did not open a native popup menu".into());
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        let mut menu_rect = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let item_height = unsafe { GetSystemMetrics(SM_CYMENU) }.max(1);
+        if unsafe { GetWindowRect(menu, &mut menu_rect) } == 0 {
+            return Err("could not read native context menu bounds".into());
+        }
+        let target_y = menu_rect.top + 2 + item_index * item_height + item_height / 2;
+        if unsafe { SetCursorPos(menu_rect.right - 10, target_y) } == 0 {
+            return Err("could not move pointer to the selected context menu item".into());
+        }
+        click_left()
+    }
+
+    fn drag_window(hwnd: Hwnd, dx: i32, dy: i32) -> Result<(Rect, Rect), String> {
+        let mut before = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if unsafe { GetWindowRect(hwnd, &mut before) } == 0 {
+            return Err("could not read overlay bounds before drag".into());
+        }
+        let start_x = (before.left + before.right) / 2;
+        let start_y = (before.top + before.bottom) / 2;
+        if unsafe { SetCursorPos(start_x, start_y) } == 0 {
+            return Err("could not move pointer onto overlay".into());
+        }
+        send_mouse(MOUSEEVENTF_LEFTDOWN)?;
+        thread::sleep(Duration::from_millis(100));
+        if unsafe { SetCursorPos(start_x + dx, start_y + dy) } == 0 {
+            return Err("could not move pointer during overlay drag".into());
+        }
+        thread::sleep(Duration::from_millis(100));
+        send_mouse(MOUSEEVENTF_LEFTUP)?;
+        thread::sleep(Duration::from_millis(100));
+        let mut after = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if unsafe { GetWindowRect(hwnd, &mut after) } == 0 {
+            return Err("could not read overlay bounds after drag".into());
+        }
+        Ok((before, after))
+    }
+
     pub fn run() -> Result<(), String> {
         let executable = std::env::args_os()
             .nth(1)
             .ok_or("usage: overlay-smoke <path-to-system-monitor-windows.exe>")?;
+        let position_file = std::env::temp_dir().join("kil0bit-rust-overlay-pot-position.txt");
+        let _ = std::fs::remove_file(&position_file);
         let mut child = Command::new(executable)
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
@@ -258,6 +367,126 @@ mod windows_smoke {
         }
         unsafe { PostMessageW(settings, WM_CLOSE, 0, 0) };
 
+        let taskbar_class: Vec<u16> = "Shell_TrayWnd\0".encode_utf16().collect();
+        let taskbar = unsafe { FindWindowW(taskbar_class.as_ptr(), std::ptr::null()) };
+        if !taskbar.is_null() {
+            let mut taskbar_rect = Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            if unsafe { GetWindowRect(taskbar, &mut taskbar_rect) } == 0 {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("could not read primary taskbar bounds".into());
+            }
+            let snap_y = taskbar_rect.top
+                + ((taskbar_rect.bottom - taskbar_rect.top) - (rect.bottom - rect.top)) / 2;
+            if (rect.top - snap_y).abs() > 2 {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "overlay was not vertically centered on taskbar: y={}, expected={snap_y}",
+                    rect.top
+                ));
+            }
+            if let Err(error) = click_context_item(hwnd, 2) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+            thread::sleep(Duration::from_millis(100));
+            let mut free_rect = Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            if unsafe { GetWindowRect(hwnd, &mut free_rect) } == 0 || free_rect.top != 100 {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Free Position did not restore the saved Y coordinate".into());
+            }
+            if let Err(error) = click_context_item(hwnd, 2) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+            thread::sleep(Duration::from_millis(100));
+            let mut snapped_rect = Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            if unsafe { GetWindowRect(hwnd, &mut snapped_rect) } == 0
+                || (snapped_rect.top - snap_y).abs() > 2
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Snap to Taskbar did not restore centered taskbar position".into());
+            }
+            if let Err(error) = click_context_item(hwnd, 2) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+
+        let (unlocked_before, unlocked_after) = match drag_window(hwnd, 36, 28) {
+            Ok(bounds) => bounds,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        if unlocked_before.left == unlocked_after.left && unlocked_before.top == unlocked_after.top
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("unlocked overlay did not move in response to drag".into());
+        }
+        if let Err(error) = click_context_item(hwnd, 0) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        let (locked_before, locked_after) = match drag_window(hwnd, 36, 28) {
+            Ok(bounds) => bounds,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        if locked_before.left != locked_after.left || locked_before.top != locked_after.top {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("locked overlay moved in response to drag".into());
+        }
+        if let Err(error) = click_context_item(hwnd, 0) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        let (unlocked_again_before, unlocked_again_after) = match drag_window(hwnd, 36, 28) {
+            Ok(bounds) => bounds,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        if unlocked_again_before.left == unlocked_again_after.left
+            && unlocked_again_before.top == unlocked_again_after.top
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("unlocked overlay did not resume dragging after unlock".into());
+        }
+
         if unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) } == 0 {
             let _ = child.kill();
             let _ = child.wait();
@@ -270,13 +499,14 @@ mod windows_smoke {
                     return Err(format!("overlay exited with status {status}"));
                 }
                 println!(
-                    "PASS: visible layered HWND ({}x{}), glyph pixel #{:02x}{:02x}{:02x}, native menu and Settings HWND, graceful shutdown",
+                    "PASS: visible layered HWND ({}x{}), desktop glyph #{:02x}{:02x}{:02x}, Settings, snap/free, drag, lock/unlock, graceful shutdown",
                     rect.right - rect.left,
                     rect.bottom - rect.top,
                     glyph_pixel & 0xff,
                     (glyph_pixel >> 8) & 0xff,
                     (glyph_pixel >> 16) & 0xff
                 );
+                let _ = std::fs::remove_file(&position_file);
                 return Ok(());
             }
             if Instant::now() >= exit_deadline {
