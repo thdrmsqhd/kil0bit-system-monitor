@@ -26,7 +26,7 @@
 | P0-T04 Define architecture decision record | `DONE` | [`decisions/ADR-001-rust-windows-architecture.md`](decisions/ADR-001-rust-windows-architecture.md); renderer/Settings toolkit selection intentionally gated on Phase 1 PoT. |
 | P0-T05 Establish Rust-only workspace and build policy | `DONE` | GitHub Actions `windows-2022` run `36401316507` passed format, Clippy, tests, and x64 MSVC release build from a clean checkout. Separate run `36402994870` launched the overlay, exercised its context menu and Settings window, and confirmed clean shutdown. No .NET commands were executed. |
 
-No .NET command, .NET runtime, or original executable has been invoked. The implementation branch is `rust/phase-0`. Do not mark Phase 0 complete until P0-T05 has passed on a clean Windows Rust/MSVC host. Linux verification results and scope are recorded in [`traceability.md`](traceability.md).
+No .NET command, .NET runtime, or original executable has been invoked. P0-T05 passed on a clean Windows Rust/MSVC CI host. The implementation branch is `rust/phase-0`; later phase gates remain open as listed below. Linux and Windows verification evidence is recorded in [`traceability.md`](traceability.md).
 
 ## Phase 0 — Baseline and design freeze
 
@@ -43,7 +43,7 @@ No .NET command, .NET runtime, or original executable has been invoked. The impl
 | Task | Implementation | Runtime verification |
 |---|---|---|
 | P1-T01 Create native overlay HWND | Implemented Win32 class registration, layered popup creation, close handling, message loop, cleanup, and AppBar position notification in `crates/system-monitor-windows/src/win32.rs`. | `RUN_PASS`: Windows CI run `36402994870` found a visible `WS_EX_LAYERED` HWND with valid bounds and observed successful process exit after `WM_CLOSE`. |
-| P1-T02 Present a transparent bitmap | Implemented deterministic premultiplied BGRA capsule/text bitmap and layered presentation; three pixel/scale tests pass. | Bitmap tests `RUN_PASS`; Windows desktop-composited glyph pixel check added, pending run `36403421076`. |
+| P1-T02 Present a transparent bitmap | Implemented deterministic premultiplied BGRA capsule/text bitmap and layered presentation; three pixel/scale tests pass. | `RUN_PASS`: Windows CI run `36403912188` read the rendered white glyph from the desktop DC as `#f2f2f2`; layered surface dimensions were 192×52. |
 | P1-T03 Prototype drag and lock | Implemented `WM_NCHITTEST` caption hit-testing plus a right-click Lock/Unlock menu. | Win32 source type-checks; interactive drag/lock not yet exercised by the automated runner. |
 | P1-T04 Prototype taskbar snap and position | Implemented primary taskbar owner/AppBar registration, vertical centering, Snap/Free menu toggle, temporary-file X/Y restore, and `ABM_WINDOWPOSCHANGED` notification. | Win32 source type-checks; taskbar snap and restart persistence not yet exercised by the automated runner. |
 | P1-T05 Prototype context menu and Settings window | Implemented Lock, Snap, Settings, and Exit PoT menu entries plus a native Settings window whose button changes overlay accent live. | `RUN_PASS`: Windows CI run `36402994870` opened the native context menu, clicked Settings, confirmed the visible Settings HWND, and closed the app cleanly. |
