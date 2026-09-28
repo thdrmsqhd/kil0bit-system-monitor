@@ -27,6 +27,9 @@ mod windows_smoke {
         fn PostMessageW(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> i32;
         fn SetCursorPos(x: i32, y: i32) -> i32;
         fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
+        fn GetDC(hwnd: Hwnd) -> Hwnd;
+        fn ReleaseDC(hwnd: Hwnd, dc: Hwnd) -> i32;
+        fn GetPixel(dc: Hwnd, x: i32, y: i32) -> u32;
     }
 
     #[repr(C)]
@@ -166,6 +169,25 @@ mod windows_smoke {
             let _ = child.wait();
             return Err("overlay HWND has invalid screen bounds".into());
         }
+        thread::sleep(Duration::from_millis(100));
+        let screen_dc = unsafe { GetDC(std::ptr::null_mut()) };
+        if screen_dc.is_null() {
+            return Err("could not capture desktop pixels".into());
+        }
+        let glyph_pixel = unsafe { GetPixel(screen_dc, rect.left + 24, rect.top + 15) };
+        unsafe { ReleaseDC(std::ptr::null_mut(), screen_dc) };
+        if glyph_pixel == u32::MAX
+            || glyph_pixel & 0xff < 210
+            || (glyph_pixel >> 8) & 0xff < 210
+            || (glyph_pixel >> 16) & 0xff < 210
+        {
+            let _ = unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "screen capture did not contain the white overlay glyph (COLORREF=0x{glyph_pixel:06x})"
+            ));
+        }
 
         let menu_class: Vec<u16> = "#32768\0".encode_utf16().collect();
         let settings_class: Vec<u16> = "Kil0bitRustSettingsPoT\0".encode_utf16().collect();
@@ -244,9 +266,12 @@ mod windows_smoke {
                     return Err(format!("overlay exited with status {status}"));
                 }
                 println!(
-                    "PASS: visible layered HWND ({}x{}), native context menu, Settings HWND, graceful shutdown",
+                    "PASS: visible layered HWND ({}x{}), glyph pixel #{:02x}{:02x}{:02x}, native menu and Settings HWND, graceful shutdown",
                     rect.right - rect.left,
-                    rect.bottom - rect.top
+                    rect.bottom - rect.top,
+                    glyph_pixel & 0xff,
+                    (glyph_pixel >> 8) & 0xff,
+                    (glyph_pixel >> 16) & 0xff
                 );
                 return Ok(());
             }
