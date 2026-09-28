@@ -13,10 +13,9 @@ mod windows_smoke {
     const WS_EX_LAYERED: isize = 0x0008_0000;
     const WM_RBUTTONUP: u32 = 0x0205;
     const WM_CLOSE: u32 = 0x0010;
-    const VK_END: usize = 0x23;
-    const VK_RETURN: usize = 0x0D;
-    const INPUT_KEYBOARD: u32 = 1;
-    const KEYEVENTF_KEYUP: u32 = 0x0002;
+    const INPUT_MOUSE: u32 = 0;
+    const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     #[link(name = "user32")]
@@ -40,9 +39,10 @@ mod windows_smoke {
 
     #[repr(C)]
     #[derive(Clone, Copy)]
-    struct KeyboardInput {
-        virtual_key: u16,
-        scan_code: u16,
+    struct MouseInput {
+        dx: i32,
+        dy: i32,
+        mouse_data: u32,
         flags: u32,
         time: u32,
         extra_info: usize,
@@ -50,7 +50,7 @@ mod windows_smoke {
 
     #[repr(C)]
     union InputData {
-        keyboard: KeyboardInput,
+        mouse: MouseInput,
         padding: [u64; 4],
     }
 
@@ -60,26 +60,28 @@ mod windows_smoke {
         data: InputData,
     }
 
-    fn press_key(virtual_key: usize) -> Result<(), String> {
+    fn click_left() -> Result<(), String> {
         let down = Input {
-            kind: INPUT_KEYBOARD,
+            kind: INPUT_MOUSE,
             data: InputData {
-                keyboard: KeyboardInput {
-                    virtual_key: virtual_key as u16,
-                    scan_code: 0,
-                    flags: 0,
+                mouse: MouseInput {
+                    dx: 0,
+                    dy: 0,
+                    mouse_data: 0,
+                    flags: MOUSEEVENTF_LEFTDOWN,
                     time: 0,
                     extra_info: 0,
                 },
             },
         };
         let up = Input {
-            kind: INPUT_KEYBOARD,
+            kind: INPUT_MOUSE,
             data: InputData {
-                keyboard: KeyboardInput {
-                    virtual_key: virtual_key as u16,
-                    scan_code: 0,
-                    flags: KEYEVENTF_KEYUP,
+                mouse: MouseInput {
+                    dx: 0,
+                    dy: 0,
+                    mouse_data: 0,
+                    flags: MOUSEEVENTF_LEFTUP,
                     time: 0,
                     extra_info: 0,
                 },
@@ -176,7 +178,7 @@ mod windows_smoke {
             let _ = child.wait();
             return Err("could not open overlay context menu".into());
         }
-        let _menu = loop {
+        let menu = loop {
             let found = unsafe { FindWindowW(menu_class.as_ptr(), std::ptr::null()) };
             if !found.is_null() {
                 break found;
@@ -189,13 +191,20 @@ mod windows_smoke {
             }
             thread::sleep(Duration::from_millis(50));
         };
-        if let Err(error) = press_key(VK_END) {
+        let mut menu_rect = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if unsafe { GetWindowRect(menu, &mut menu_rect) } == 0
+            || unsafe { SetCursorPos(menu_rect.right - 10, menu_rect.bottom - 10) } == 0
+        {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(error);
+            return Err("could not locate the Settings menu row".into());
         }
-        thread::sleep(Duration::from_millis(100));
-        if let Err(error) = press_key(VK_RETURN) {
+        if let Err(error) = click_left() {
             let _ = child.kill();
             let _ = child.wait();
             return Err(error);
