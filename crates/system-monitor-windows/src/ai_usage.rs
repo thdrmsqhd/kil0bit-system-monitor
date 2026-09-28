@@ -57,6 +57,38 @@ impl AiUsageWorker {
         store: crate::secret_store::SecretStore,
         on_event: impl Fn(ProviderEvent) + Send + Sync + 'static,
     ) -> Self {
+        Self::start_with_fetch(
+            interval_seconds,
+            move || {
+                store
+                    .load()
+                    .map_err(|_| ProviderError::MissingKey)
+                    .and_then(|key| fetch_opencode_usage(&key))
+            },
+            on_event,
+        )
+    }
+
+    pub fn start_codex(
+        interval_seconds: u32,
+        on_event: impl Fn(ProviderEvent) + Send + Sync + 'static,
+    ) -> Self {
+        Self::start_with_fetch(
+            interval_seconds,
+            || {
+                let path = codex_auth_path()?;
+                let token = read_codex_access_token(&path)?;
+                fetch_codex_usage(&token)
+            },
+            on_event,
+        )
+    }
+
+    fn start_with_fetch(
+        interval_seconds: u32,
+        fetch: impl Fn() -> Result<AiUsageSnapshot, ProviderError> + Send + 'static,
+        on_event: impl Fn(ProviderEvent) + Send + Sync + 'static,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let interval_seconds = Arc::new(AtomicU32::new(interval_seconds.clamp(60, 3600)));
         let worker_stop = Arc::clone(&stop);
@@ -65,10 +97,7 @@ impl AiUsageWorker {
             let mut last_good: Option<AiUsageSnapshot> = None;
             let mut failures = 0_u32;
             while !worker_stop.load(Ordering::Acquire) {
-                let result = store
-                    .load()
-                    .map_err(|_| ProviderError::MissingKey)
-                    .and_then(|key| fetch_opencode_usage(&key));
+                let result = fetch();
                 let error = result.as_ref().err().cloned();
                 match result {
                     Ok(snapshot) => {

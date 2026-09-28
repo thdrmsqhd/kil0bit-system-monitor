@@ -61,7 +61,7 @@ pub fn build_metrics_bitmap(
         "K",
         format!("{}%", metrics.disk_used_percent.clamp(0.0, 100.0) as u32),
     );
-    if config.opencode_enabled {
+    if config.opencode_enabled || config.codex_enabled {
         if let Some(snapshot) = ai {
             let mut add_window =
                 |enabled: bool,
