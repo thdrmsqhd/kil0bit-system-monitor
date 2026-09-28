@@ -11,7 +11,11 @@ mod windows_smoke {
     type Hwnd = *mut c_void;
     const GWL_EXSTYLE: i32 = -20;
     const WS_EX_LAYERED: isize = 0x0008_0000;
+    const WM_RBUTTONUP: u32 = 0x0205;
+    const WM_KEYDOWN: u32 = 0x0100;
     const WM_CLOSE: u32 = 0x0010;
+    const VK_END: usize = 0x23;
+    const VK_RETURN: usize = 0x0D;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     #[link(name = "user32")]
@@ -21,6 +25,7 @@ mod windows_smoke {
         fn IsWindowVisible(hwnd: Hwnd) -> i32;
         fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
         fn PostMessageW(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> i32;
+        fn SetCursorPos(x: i32, y: i32) -> i32;
     }
 
     #[repr(C)]
@@ -93,6 +98,57 @@ mod windows_smoke {
             return Err("overlay HWND has invalid screen bounds".into());
         }
 
+        let menu_class: Vec<u16> = "#32768\0".encode_utf16().collect();
+        let settings_class: Vec<u16> = "Kil0bitRustSettingsPoT\0".encode_utf16().collect();
+        let menu_deadline = Instant::now() + Duration::from_secs(3);
+        if unsafe { SetCursorPos((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2) } == 0
+            || unsafe { PostMessageW(hwnd, WM_RBUTTONUP, 0, 0) } == 0
+        {
+            let _ = unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("could not open overlay context menu".into());
+        }
+        let menu = loop {
+            let found = unsafe { FindWindowW(menu_class.as_ptr(), std::ptr::null()) };
+            if !found.is_null() {
+                break found;
+            }
+            if Instant::now() >= menu_deadline {
+                let _ = unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("right-click did not open a native popup menu".into());
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        unsafe {
+            PostMessageW(menu, WM_KEYDOWN, VK_END, 0);
+            PostMessageW(menu, WM_KEYDOWN, VK_RETURN, 0);
+        }
+
+        let settings_deadline = Instant::now() + Duration::from_secs(3);
+        let settings = loop {
+            let found = unsafe { FindWindowW(settings_class.as_ptr(), std::ptr::null()) };
+            if !found.is_null() {
+                break found;
+            }
+            if Instant::now() >= settings_deadline {
+                let _ = unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Settings window did not open from the context menu".into());
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        if unsafe { IsWindowVisible(settings) } == 0 {
+            let _ = unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Settings HWND was created but is not visible".into());
+        }
+        unsafe { PostMessageW(settings, WM_CLOSE, 0, 0) };
+
         if unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) } == 0 {
             let _ = child.kill();
             let _ = child.wait();
@@ -105,7 +161,7 @@ mod windows_smoke {
                     return Err(format!("overlay exited with status {status}"));
                 }
                 println!(
-                    "PASS: visible layered HWND, {}x{} pixels, graceful WM_CLOSE shutdown",
+                    "PASS: visible layered HWND ({}x{}), native context menu, Settings HWND, graceful shutdown",
                     rect.right - rect.left,
                     rect.bottom - rect.top
                 );

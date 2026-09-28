@@ -594,6 +594,13 @@ unsafe fn show_context_menu(hwnd: Hwnd) {
         MENU_TOGGLE_SNAP as usize,
         snap_text.as_ptr(),
     );
+    let settings_text: Vec<u16> = "Settings\0".encode_utf16().collect();
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_SETTINGS as usize,
+        settings_text.as_ptr(),
+    );
     let mut point = Point { x: 0, y: 0 };
     if GetCursorPos(&mut point) != 0 {
         let selected = TrackPopupMenu(
