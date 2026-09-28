@@ -1,5 +1,7 @@
 # kil0bit System Monitor v3
 
+> **Rust port development is active on `rust/phase-0`.** This fork preserves the upstream project and its original .NET documentation; the parallel Rust implementation is under `crates/` and does not require .NET to build or run. See [`docs/rust-port/README.md`](docs/rust-port/README.md) for Rust-only build and verification instructions. The Rust port is still under development and is not a replacement release yet.
+
 <div align="center">
 
 <img src="icon.png" width="100" height="100" alt="kil0bit System Monitor" />

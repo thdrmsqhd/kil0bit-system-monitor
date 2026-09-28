@@ -21,6 +21,13 @@ jobs:
         run: cargo test --workspace
       - name: Release build
         run: cargo build --workspace --release --target x86_64-pc-windows-msvc
+      - name: Assemble Rust-only portable directory
+        run: cargo run -p system-monitor-core --bin package-port -- target/x86_64-pc-windows-msvc/release/system-monitor-windows.exe rust-port-package
+      - name: Upload Rust-only package
+        uses: actions/upload-artifact@v4
+        with:
+          name: kil0bit-system-monitor-rust-port
+          path: rust-port-package
       - name: Win32 layered-window smoke test
         shell: pwsh
         run: >-
