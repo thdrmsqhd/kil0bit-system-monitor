@@ -42,4 +42,8 @@ This section records the verification run performed on the Linux workspace host.
 - Windows MSVC target: workspace `cargo check` with warnings denied passed. This is target-aware Rust checking, not a native MSVC link or Windows run.
 - Windows GNU target: release build linked with MinGW. The output is a PE32+ x86-64 Windows GUI executable with the expected USER32/GDI32/SHELL32/KERNEL32 imports.
 - GUI execution: attempted with Wine 9 under Xvfb. Wine stopped before launching the app because `wineserver` could not create/use its socket (`Operation not permitted`) in the managed container. No overlay screenshot or interaction result is claimed.
-- Native Windows/MSVC overlay acceptance therefore remains unverified. The steps below are the acceptance record to complete on a Windows host; no user-side action was available in this session.
+- The local Linux session therefore produced no GUI runtime result. A Windows-hosted CI smoke harness was added afterward; its first run is the next execution gate. The steps below record the remaining interaction and visual acceptance checks that the smoke harness does not cover.
+
+## Automated Windows runner smoke test
+
+The feature branch now has a Rust-only GitHub Actions job on `windows-2022`. It runs format, Clippy, tests, MSVC release build, then launches the overlay PoT with `overlay-smoke.exe`. The harness checks that the child process creates a visible `WS_EX_LAYERED` HWND with non-zero bounds and exits cleanly after `WM_CLOSE`. This verifies actual Windows HWND creation and shutdown, but it does not exercise taskbar positioning, right-click menu selection, multi-monitor/DPI behavior, or visual appearance. Those remain separate acceptance checks.

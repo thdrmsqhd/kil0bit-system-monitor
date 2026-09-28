@@ -24,7 +24,7 @@
 | P0-T02 Resolve source/document discrepancies | `DONE` | Source-derived decisions recorded in the feature catalog. |
 | P0-T03 Create traceability matrix | `DONE` | [`traceability.md`](traceability.md) maps all 35 baseline IDs to task/function contracts and verification evidence. |
 | P0-T04 Define architecture decision record | `DONE` | [`decisions/ADR-001-rust-windows-architecture.md`](decisions/ADR-001-rust-windows-architecture.md); renderer/Settings toolkit selection intentionally gated on Phase 1 PoT. |
-| P0-T05 Establish Rust-only workspace and build policy | `IN_PROGRESS` | Linux Rust 1.75/1.91 and stable 1.98 checks pass. Stable 1.98 Windows MSVC target checks pass; GNU target links to a PE32+ Windows GUI executable. Native Windows launch remains `BLOCKED`. Wine launch was attempted under Xvfb but `wineserver` failed with `socket: Operation not permitted` in this container. |
+| P0-T05 Establish Rust-only workspace and build policy | `IN_PROGRESS` | Linux Rust tests pass. GitHub Actions `windows-2022` run `36401316507` passed format, Clippy, tests, and x64 MSVC release build. A Windows HWND runtime smoke step has now been added and awaits its first CI run. No .NET commands were executed. |
 
 No .NET command, .NET runtime, or original executable has been invoked. The implementation branch is `rust/phase-0`. Do not mark Phase 0 complete until P0-T05 has passed on a clean Windows Rust/MSVC host. Linux verification results and scope are recorded in [`traceability.md`](traceability.md).
 
@@ -42,7 +42,7 @@ No .NET command, .NET runtime, or original executable has been invoked. The impl
 
 | Task | Implementation | Runtime verification |
 |---|---|---|
-| P1-T01 Create native overlay HWND | Implemented Win32 class registration, layered popup creation, close handling, message loop, cleanup, and AppBar position notification in `crates/system-monitor-windows/src/win32.rs`. | Source type-checks for MSVC and GNU Windows targets; GNU release links as PE32+ GUI. `BLOCKED`: actual HWND run not achieved; Wine cannot create its server socket in this container. |
+| P1-T01 Create native overlay HWND | Implemented Win32 class registration, layered popup creation, close handling, message loop, cleanup, and AppBar position notification in `crates/system-monitor-windows/src/win32.rs`. Added `overlay-smoke.exe` to check real HWND creation and shutdown on the Windows CI host. | Windows MSVC build passes. HWND smoke run pending. |
 | P1-T02 Present a transparent bitmap | Implemented deterministic premultiplied BGRA capsule/text bitmap and layered presentation; three pixel/scale tests pass. | Bitmap and DPI-scale tests `RUN_PASS`; Windows visual presentation `BLOCKED` pending a Windows GUI runtime. |
 | P1-T03 Prototype drag and lock | Implemented `WM_NCHITTEST` caption hit-testing plus a right-click Lock/Unlock menu. | Win32 source type-checks; interactive drag/lock `BLOCKED` pending Windows GUI runtime. |
 | P1-T04 Prototype taskbar snap and position | Implemented primary taskbar owner/AppBar registration, vertical centering, Snap/Free menu toggle, temporary-file X/Y restore, and `ABM_WINDOWPOSCHANGED` notification. | Win32 source type-checks; taskbar snap and restart persistence `BLOCKED` pending Windows GUI runtime. |
