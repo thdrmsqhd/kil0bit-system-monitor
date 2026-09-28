@@ -110,6 +110,8 @@ static AI_OPTION_CONTROLS: [std::sync::atomic::AtomicPtr<c_void>; 4] = [
 ];
 static AI_INTERVAL_COMBO: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
+static STARTUP_STATUS: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
 const VK_ESCAPE: usize = 0x1B;
 const SW_SHOWNOACTIVATE: i32 = 4;
 const DIB_RGB_COLORS: u32 = 0;
@@ -520,6 +522,7 @@ unsafe extern "system" fn settings_window_proc(
             AI_KEY_EDIT.store(null_mut(), Ordering::Relaxed);
             AI_KEY_STATUS.store(null_mut(), Ordering::Relaxed);
             STARTUP_CHECKBOX.store(null_mut(), Ordering::Relaxed);
+            STARTUP_STATUS.store(null_mut(), Ordering::Relaxed);
             for control in &AI_OPTION_CONTROLS {
                 control.store(null_mut(), Ordering::Relaxed);
             }
@@ -783,6 +786,22 @@ unsafe fn open_settings_window(owner: Hwnd) {
     {
         SendMessageW(startup, BM_SETCHECK, BST_CHECKED, 0);
     }
+    let startup_status_text: Vec<u16> = "Startup status ".encode_utf16().collect();
+    let startup_status = CreateWindowExW(
+        0,
+        label_class.as_ptr(),
+        startup_status_text.as_ptr(),
+        WS_CHILD | WS_VISIBLE,
+        24,
+        382,
+        450,
+        22,
+        window,
+        null_mut(),
+        instance,
+        null_mut(),
+    );
+    STARTUP_STATUS.store(startup_status, Ordering::Relaxed);
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
 }
@@ -915,7 +934,7 @@ fn set_ai_key_status(text: &str) {
 }
 
 fn set_startup_status(text: &str) {
-    let status = AI_KEY_STATUS.load(Ordering::Relaxed);
+    let status = STARTUP_STATUS.load(Ordering::Relaxed);
     if status.is_null() {
         return;
     }

@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 use std::time::Instant;
 use sysinfo::{Disks, Networks, System};
-use system_monitor_core::{bytes_per_second_to_kib, format_network_rate, SystemMetrics};
+use system_monitor_core::{
+    bytes_per_second_to_kib, format_network_rate, DiskMetric, SystemMetrics,
+};
 
 pub struct TelemetryCollector {
     system: System,
@@ -37,6 +39,7 @@ impl TelemetryCollector {
         self.system.refresh_cpu_usage();
         self.system.refresh_memory();
         self.networks.refresh(true);
+        self.disks.refresh(true);
         let mut received = 0_u64;
         let mut transmitted = 0_u64;
         self.adapter_totals.clear();
@@ -68,6 +71,33 @@ impl TelemetryCollector {
         } else {
             used_memory as f32 / total_memory as f32 * 100.0
         };
+        let disk_metrics: Vec<DiskMetric> = self
+            .disks
+            .iter()
+            .filter_map(|disk| {
+                let total = disk.total_space();
+                if total == 0 {
+                    return None;
+                }
+                let used = total.saturating_sub(disk.available_space());
+                Some(DiskMetric {
+                    name: disk.mount_point().to_string_lossy().into_owned(),
+                    space_percent: used as f32 / total as f32 * 100.0,
+                    activity_percent: 0.0,
+                })
+            })
+            .collect();
+        let total_space: u128 = self.disks.iter().map(|d| d.total_space() as u128).sum();
+        let used_space: u128 = self
+            .disks
+            .iter()
+            .map(|d| d.total_space().saturating_sub(d.available_space()) as u128)
+            .sum();
+        let disk_used_percent = if total_space == 0 {
+            0.0
+        } else {
+            used_space as f32 / total_space as f32 * 100.0
+        };
         SystemMetrics {
             cpu_usage_percent: self.system.global_cpu_usage().clamp(0.0, 100.0),
             ram_percent: ram_percent.clamp(0.0, 100.0),
@@ -75,6 +105,8 @@ impl TelemetryCollector {
             net_down_kbps: down,
             net_up_text: format_network_rate(up),
             net_down_text: format_network_rate(down),
+            disk_used_percent: disk_used_percent.clamp(0.0, 100.0),
+            disks: disk_metrics,
             gpu_temperature_c: None,
             ..SystemMetrics::default()
         }
