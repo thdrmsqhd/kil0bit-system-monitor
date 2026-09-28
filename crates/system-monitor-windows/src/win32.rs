@@ -70,6 +70,8 @@ const SETTINGS_AI_WEEKLY: usize = 1006;
 const SETTINGS_AI_MONTHLY: usize = 1007;
 const SETTINGS_AI_USED: usize = 1008;
 const SETTINGS_AI_INTERVAL: usize = 1009;
+const SETTINGS_PORT_FIRST: usize = 1011;
+const SETTINGS_PORT_LAST: usize = 1022;
 const AI_INTERVALS: [u32; 4] = [60, 300, 900, 3600];
 const BM_GETCHECK: u32 = 0x00F0;
 const BM_SETCHECK: u32 = 0x00F1;
@@ -118,6 +120,20 @@ static AI_INTERVAL_COMBO: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static STARTUP_STATUS: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
+static PORT_OPTION_CONTROLS: [std::sync::atomic::AtomicPtr<c_void>; 12] = [
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+];
 const VK_ESCAPE: usize = 0x1B;
 const SW_SHOWNOACTIVATE: i32 = 4;
 const DIB_RGB_COLORS: u32 = 0;
@@ -529,6 +545,10 @@ unsafe extern "system" fn settings_window_proc(
             save_ai_options_from_settings();
             0
         }
+        WM_COMMAND if (SETTINGS_PORT_FIRST..=SETTINGS_PORT_LAST).contains(&(wparam & 0xffff)) => {
+            save_port_options_from_settings(hwnd);
+            0
+        }
         WM_CLOSE => {
             DestroyWindow(hwnd);
             0
@@ -545,6 +565,9 @@ unsafe extern "system" fn settings_window_proc(
                 control.store(null_mut(), Ordering::Relaxed);
             }
             AI_INTERVAL_COMBO.store(null_mut(), Ordering::Relaxed);
+            for control in &PORT_OPTION_CONTROLS {
+                control.store(null_mut(), Ordering::Relaxed);
+            }
             0
         }
         _ => DefWindowProcW(hwnd, message, wparam, lparam),
@@ -559,7 +582,7 @@ unsafe fn open_settings_window(owner: Hwnd) {
     }
     let instance = GetModuleHandleW(null());
     let class_name: Vec<u16> = "Kil0bitRustSettingsPoT\0".encode_utf16().collect();
-    let title: Vec<u16> = "Rust Overlay PoT Settings\0".encode_utf16().collect();
+    let title: Vec<u16> = "Kil0bit System Monitor Settings\0".encode_utf16().collect();
     let class = WindowClass {
         style: 0,
         window_proc: Some(settings_window_proc),
@@ -583,7 +606,7 @@ unsafe fn open_settings_window(owner: Hwnd) {
         300,
         100,
         560,
-        460,
+        760,
         owner,
         null_mut(),
         instance,
@@ -825,6 +848,73 @@ unsafe fn open_settings_window(owner: Hwnd) {
         null_mut(),
     );
     STARTUP_STATUS.store(startup_status, Ordering::Relaxed);
+    let section_text: Vec<u16> = "Telemetry and overlay options"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    CreateWindowExW(
+        0,
+        label_class.as_ptr(),
+        section_text.as_ptr(),
+        WS_CHILD | WS_VISIBLE,
+        24,
+        450,
+        500,
+        24,
+        window,
+        null_mut(),
+        instance,
+        null_mut(),
+    );
+    let port_options = [
+        ("CPU usage", config.show_cpu),
+        ("RAM usage", config.show_ram),
+        ("GPU load", config.show_gpu),
+        ("GPU temperature", config.show_temp),
+        ("Disk used space", config.show_disk),
+        ("Network upload", config.show_net_up),
+        ("Network download", config.show_net_down),
+        ("Show overlay", config.show_overlay),
+        ("Lock position", config.lock_position),
+        ("Snap to taskbar", config.stick_to_taskbar),
+        ("Keep on top", config.always_on_top),
+        ("Compact display", config.display_style == "Compact"),
+    ];
+    for (index, (caption, checked)) in port_options.iter().enumerate() {
+        let text: Vec<u16> = format!("{caption}\0").encode_utf16().collect();
+        let y = if index < 7 {
+            478 + (index as i32 / 2) * 28
+        } else if index == 11 {
+            562
+        } else {
+            594 + ((index - 7) as i32) * 28
+        };
+        let x = if index < 7 {
+            24 + (index as i32 % 2) * 270
+        } else if index == 11 {
+            294
+        } else {
+            24
+        };
+        let control = CreateWindowExW(
+            0,
+            button_class.as_ptr(),
+            text.as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0003,
+            x,
+            y,
+            260,
+            24,
+            window,
+            (SETTINGS_PORT_FIRST + index) as *mut c_void,
+            instance,
+            null_mut(),
+        );
+        PORT_OPTION_CONTROLS[index].store(control, Ordering::Relaxed);
+        if *checked {
+            SendMessageW(control, BM_SETCHECK, BST_CHECKED, 0);
+        }
+    }
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
 }
@@ -982,6 +1072,71 @@ fn save_ai_options_from_settings() {
     }
 }
 
+unsafe fn save_port_options_from_settings(_settings_hwnd: Hwnd) {
+    let checked: Vec<bool> = PORT_OPTION_CONTROLS
+        .iter()
+        .map(|control| {
+            let handle = control.load(Ordering::Relaxed);
+            !handle.is_null() && SendMessageW(handle, BM_GETCHECK, 0, 0) == BST_CHECKED as isize
+        })
+        .collect();
+    if checked.len() != 12 {
+        return;
+    }
+    let (old_snap, old_topmost) = config_lock()
+        .lock()
+        .map(|c| (c.stick_to_taskbar, c.always_on_top))
+        .unwrap_or((true, true));
+    if let Ok(mut config) = config_lock().lock() {
+        config.show_cpu = checked[0];
+        config.show_ram = checked[1];
+        config.show_gpu = checked[2];
+        config.show_temp = checked[3];
+        config.show_disk = checked[4];
+        config.show_net_up = checked[5];
+        config.show_net_down = checked[6];
+        config.show_overlay = checked[7];
+        config.lock_position = checked[8];
+        config.stick_to_taskbar = checked[9];
+        config.always_on_top = checked[10];
+        config.display_style = if checked[11] { "Compact" } else { "Text" }.into();
+        let _ = config_store::save(&config_path(), &config);
+    }
+    POSITION_LOCKED.store(checked[8], Ordering::Relaxed);
+    let overlay = OVERLAY_HANDLE.load(Ordering::Relaxed);
+    if overlay.is_null() {
+        return;
+    }
+    if old_snap != checked[9] {
+        if checked[9] {
+            attach_to_taskbar(overlay, 52);
+        } else {
+            detach_from_taskbar(overlay);
+        }
+    }
+    if old_topmost != checked[10] {
+        SetWindowPos(
+            overlay,
+            if checked[10] {
+                HWND_TOPMOST
+            } else {
+                HWND_NOTOPMOST
+            },
+            0,
+            0,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE | 0x0002,
+        );
+    }
+    if checked[7] {
+        ShowWindow(overlay, SW_SHOWNOACTIVATE);
+        refresh_overlay(overlay);
+    } else {
+        ShowWindow(overlay, 0);
+    }
+}
+
 fn set_ai_key_status(text: &str) {
     let status = AI_KEY_STATUS.load(Ordering::Relaxed);
     if status.is_null() {
@@ -1108,7 +1263,7 @@ unsafe fn show_context_menu(hwnd: Hwnd) {
     } else {
         "Lock Position\0".encode_utf16().collect()
     };
-    let exit_text: Vec<u16> = "Exit PoT\0".encode_utf16().collect();
+    let exit_text: Vec<u16> = "Exit Monitor\0".encode_utf16().collect();
     AppendMenuW(
         menu,
         MF_STRING | if locked { MF_CHECKED } else { 0 },
@@ -1255,7 +1410,7 @@ pub fn run(_pixels: &[u8], _width: i32, _height: i32) -> Result<(), WinError> {
             return Err(last_error("GetModuleHandleW"));
         }
         let class_name: Vec<u16> = "Kil0bitRustOverlayPoT\0".encode_utf16().collect();
-        let window_name: Vec<u16> = "Rust overlay PoT — right-click for menu\0"
+        let window_name: Vec<u16> = "Kil0bit System Monitor Rust — right-click for menu\0"
             .encode_utf16()
             .collect();
         let class = WindowClass {
@@ -1311,7 +1466,11 @@ pub fn run(_pixels: &[u8], _width: i32, _height: i32) -> Result<(), WinError> {
         if SNAP_TO_TASKBAR.load(Ordering::Relaxed) {
             attach_to_taskbar(hwnd, initial_height);
         }
-        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        if config_lock().lock().map(|c| c.show_overlay).unwrap_or(true) {
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        } else {
+            ShowWindow(hwnd, 0);
+        }
         start_ai_worker(hwnd);
         let interval = config_lock()
             .lock()
@@ -1569,6 +1728,14 @@ fn poll_telemetry(hwnd: Hwnd) {
 }
 
 unsafe fn refresh_overlay(hwnd: Hwnd) {
+    let visible = config_lock()
+        .lock()
+        .map(|config| config.show_overlay)
+        .unwrap_or(true);
+    if !visible {
+        ShowWindow(hwnd, 0);
+        return;
+    }
     let (pixels, width, height) = render_current_bitmap();
     let _ = present_bitmap(hwnd, &pixels, width, height);
 }
