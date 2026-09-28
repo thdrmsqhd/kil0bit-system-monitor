@@ -8,7 +8,7 @@ use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, OnceLock};
-use system_monitor_core::{config_store, AppConfig};
+use system_monitor_core::{config_store, AiUsageSnapshot, AppConfig, SystemMetrics};
 use zeroize::Zeroize;
 
 pub type Hwnd = *mut c_void;
@@ -37,6 +37,8 @@ const WM_DPICHANGED: u32 = 0x02E0;
 const WM_COMMAND: u32 = 0x0111;
 const WM_APP_REFRESH: u32 = 0x8001;
 const WM_APP_SHOW_SETTINGS: u32 = 0x8002;
+const WM_TIMER: u32 = 0x0113;
+const TELEMETRY_TIMER_ID: usize = 1;
 const GWLP_HWNDPARENT: i32 = -8;
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOZORDER: u32 = 0x0004;
@@ -57,6 +59,10 @@ const MENU_SETTINGS: u32 = 4;
 const SETTINGS_TOGGLE_ACCENT: usize = 1001;
 const SETTINGS_SAVE_OPENCODE_KEY: usize = 1002;
 const SETTINGS_REMOVE_OPENCODE_KEY: usize = 1003;
+const SETTINGS_TOGGLE_STARTUP: usize = 1004;
+const BM_GETCHECK: u32 = 0x00F0;
+const BM_SETCHECK: u32 = 0x00F1;
+const BST_CHECKED: usize = 1;
 const WS_BORDER: u32 = 0x0080_0000;
 const ES_PASSWORD: u32 = 0x0020;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
@@ -75,6 +81,10 @@ static ALTERNATE_ACCENT: AtomicBool = AtomicBool::new(false);
 static DPI_SCALE_PERCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
 static CONFIG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 static APP_CONFIG: OnceLock<Mutex<AppConfig>> = OnceLock::new();
+static CURRENT_METRICS: OnceLock<Mutex<SystemMetrics>> = OnceLock::new();
+static TELEMETRY: OnceLock<Mutex<super::telemetry::TelemetryCollector>> = OnceLock::new();
+static AI_SNAPSHOT: OnceLock<Mutex<Option<AiUsageSnapshot>>> = OnceLock::new();
+static AI_WORKER: OnceLock<Mutex<Option<super::ai_usage::AiUsageWorker>>> = OnceLock::new();
 static OVERLAY_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static SETTINGS_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
@@ -82,6 +92,8 @@ static SETTINGS_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
 static AI_KEY_EDIT: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static AI_KEY_STATUS: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static STARTUP_CHECKBOX: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 const VK_ESCAPE: usize = 0x1B;
 const SW_SHOWNOACTIVATE: i32 = 4;
@@ -236,6 +248,7 @@ extern "system" {
     fn GetWindowTextLengthW(hwnd: Hwnd) -> i32;
     fn GetWindowTextW(hwnd: Hwnd, text: *mut u16, max_count: i32) -> i32;
     fn SetWindowTextW(hwnd: Hwnd, text: *const u16) -> i32;
+    fn SendMessageW(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> Lresult;
     fn GetDC(hwnd: Hwnd) -> Hdc;
     fn ReleaseDC(hwnd: Hwnd, dc: Hdc) -> i32;
     fn UpdateLayeredWindow(
@@ -252,6 +265,8 @@ extern "system" {
     fn GetModuleHandleW(module_name: *const u16) -> Hinstance;
     fn SetProcessDpiAwarenessContext(context: *mut c_void) -> i32;
     fn CreateMutexW(attributes: *mut c_void, initial_owner: i32, name: *const u16) -> *mut c_void;
+    fn SetTimer(hwnd: Hwnd, timer_id: usize, interval_ms: u32, callback: *mut c_void) -> usize;
+    fn KillTimer(hwnd: Hwnd, timer_id: usize) -> i32;
 }
 
 #[link(name = "shell32")]
@@ -305,7 +320,19 @@ unsafe extern "system" fn window_proc(
             open_settings_window(hwnd);
             0
         }
+        WM_TIMER if wparam == TELEMETRY_TIMER_ID => {
+            poll_telemetry(hwnd);
+            0
+        }
         WM_DESTROY => {
+            KillTimer(hwnd, TELEMETRY_TIMER_ID);
+            if let Some(worker) = AI_WORKER
+                .get()
+                .and_then(|v| v.lock().ok())
+                .and_then(|mut v| v.take())
+            {
+                drop(worker);
+            }
             remove_appbar(hwnd);
             OVERLAY_HANDLE.store(null_mut(), Ordering::Relaxed);
             let settings = SETTINGS_HANDLE.swap(null_mut(), Ordering::Relaxed);
@@ -417,13 +444,50 @@ unsafe extern "system" fn settings_window_proc(
             0
         }
         WM_COMMAND if (wparam & 0xffff) == SETTINGS_REMOVE_OPENCODE_KEY => {
-            let status = match crate::secret_store::SecretStore::opencode()
-                .and_then(|store| store.remove())
-            {
-                Ok(()) => "OpenCode key removed",
-                Err(_) => "Could not remove OpenCode key",
-            };
-            set_ai_key_status(status);
+            let result =
+                crate::secret_store::SecretStore::opencode().and_then(|store| store.remove());
+            if result.is_ok() {
+                if let Ok(mut config) = config_lock().lock() {
+                    config.opencode_enabled = false;
+                    let _ = config_store::save(&config_path(), &config);
+                }
+                if let Some(worker) = AI_WORKER
+                    .get()
+                    .and_then(|v| v.lock().ok())
+                    .and_then(|mut v| v.take())
+                {
+                    drop(worker);
+                }
+                if let Some(snapshot) = AI_SNAPSHOT.get() {
+                    if let Ok(mut value) = snapshot.lock() {
+                        *value = None;
+                    }
+                }
+                set_ai_key_status("OpenCode key removed");
+            } else {
+                set_ai_key_status("Could not remove OpenCode key");
+            }
+            let overlay = OVERLAY_HANDLE.load(Ordering::Relaxed);
+            if !overlay.is_null() {
+                PostMessageW(overlay, WM_APP_REFRESH, 0, 0);
+            }
+            0
+        }
+        WM_COMMAND if (wparam & 0xffff) == SETTINGS_TOGGLE_STARTUP => {
+            let checkbox = STARTUP_CHECKBOX.load(Ordering::Relaxed);
+            if !checkbox.is_null() {
+                let enabled = SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+                if let Ok(mut config) = config_lock().lock() {
+                    config.launch_on_startup = enabled;
+                    let saved = config_store::save(&config_path(), &config).is_ok();
+                    let registered = set_startup_registration(enabled).is_ok();
+                    set_startup_status(if saved && registered {
+                        "Startup setting saved"
+                    } else {
+                        "Could not update startup setting"
+                    });
+                }
+            }
             0
         }
         WM_CLOSE => {
@@ -436,6 +500,7 @@ unsafe extern "system" fn settings_window_proc(
                 .ok();
             AI_KEY_EDIT.store(null_mut(), Ordering::Relaxed);
             AI_KEY_STATUS.store(null_mut(), Ordering::Relaxed);
+            STARTUP_CHECKBOX.store(null_mut(), Ordering::Relaxed);
             0
         }
         _ => DefWindowProcW(hwnd, message, wparam, lparam),
@@ -586,6 +651,31 @@ unsafe fn open_settings_window(owner: Hwnd) {
         null_mut(),
     );
     AI_KEY_STATUS.store(status, Ordering::Relaxed);
+    let startup_text: Vec<u16> = "Launch Rust monitor when I sign in\0"
+        .encode_utf16()
+        .collect();
+    let startup = CreateWindowExW(
+        0,
+        button_class.as_ptr(),
+        startup_text.as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0003,
+        24,
+        224,
+        340,
+        26,
+        window,
+        SETTINGS_TOGGLE_STARTUP as *mut c_void,
+        instance,
+        null_mut(),
+    );
+    STARTUP_CHECKBOX.store(startup, Ordering::Relaxed);
+    if config_lock()
+        .lock()
+        .map(|config| config.launch_on_startup)
+        .unwrap_or(false)
+    {
+        SendMessageW(startup, BM_SETCHECK, BST_CHECKED, 0);
+    }
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
 }
@@ -599,18 +689,81 @@ unsafe fn save_opencode_key_from_settings() {
     let mut buffer = vec![0_u16; length + 1];
     let actual = GetWindowTextW(edit, buffer.as_mut_ptr(), buffer.len() as i32).max(0) as usize;
     let mut key = String::from_utf16_lossy(&buffer[..actual]);
+    if key.trim().is_empty() {
+        key.zeroize();
+        buffer.zeroize();
+        set_ai_key_status("Enter an OpenCode Go API key first");
+        return;
+    }
     let result = crate::secret_store::SecretStore::opencode().and_then(|store| store.save(&key));
     key.zeroize();
     buffer.zeroize();
     let empty: Vec<u16> = "\0".encode_utf16().collect();
     SetWindowTextW(edit, empty.as_ptr());
     match result {
-        Ok(()) => set_ai_key_status("OpenCode key saved for this Windows user"),
+        Ok(()) => {
+            if let Ok(mut config) = config_lock().lock() {
+                config.opencode_enabled = true;
+                let _ = config_store::save(&config_path(), &config);
+            }
+            set_ai_key_status("OpenCode key saved for this Windows user");
+            start_ai_worker(OVERLAY_HANDLE.load(Ordering::Relaxed));
+        }
         Err(_) => set_ai_key_status("Could not save OpenCode key"),
     }
 }
 
+fn start_ai_worker(hwnd: Hwnd) {
+    if hwnd.is_null() {
+        return;
+    }
+    let config = config_lock().lock().map(|c| c.clone()).unwrap_or_default();
+    if !config.opencode_enabled {
+        return;
+    }
+    let Ok(store) = crate::secret_store::SecretStore::opencode() else {
+        return;
+    };
+    if !store.exists() {
+        return;
+    }
+    let Ok(mut slot) = AI_WORKER.get_or_init(|| Mutex::new(None)).lock() else {
+        return;
+    };
+    if let Some(worker) = slot.as_ref() {
+        worker.wake();
+        return;
+    }
+    let hwnd_value = hwnd as usize;
+    let worker = super::ai_usage::AiUsageWorker::start(
+        config.ai_poll_interval_seconds,
+        store,
+        move |event| {
+            if let Some(snapshot) = AI_SNAPSHOT.get() {
+                if let Ok(mut value) = snapshot.lock() {
+                    *value = event.snapshot;
+                }
+            }
+            unsafe {
+                PostMessageW(hwnd_value as Hwnd, WM_APP_REFRESH, 0, 0);
+            }
+        },
+    );
+    *slot = Some(worker);
+}
+
 fn set_ai_key_status(text: &str) {
+    let status = AI_KEY_STATUS.load(Ordering::Relaxed);
+    if status.is_null() {
+        return;
+    }
+    let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        SetWindowTextW(status, wide.as_ptr());
+    }
+}
+
+fn set_startup_status(text: &str) {
     let status = AI_KEY_STATUS.load(Ordering::Relaxed);
     if status.is_null() {
         return;
@@ -791,12 +944,17 @@ unsafe fn show_context_menu(hwnd: Hwnd) {
 }
 
 /// Registers the window class, creates a layered popup, presents one sample frame, and runs its message loop.
-pub fn run(pixels: &[u8], width: i32, height: i32) -> Result<(), WinError> {
+pub fn run(_pixels: &[u8], _width: i32, _height: i32) -> Result<(), WinError> {
     let Some(_instance_lock) = SingleInstanceLock::acquire()? else {
         return Ok(());
     };
     unsafe {
         load_config();
+        let mut telemetry = super::telemetry::TelemetryCollector::new();
+        let first_sample = telemetry.sample();
+        let _ = TELEMETRY.set(Mutex::new(telemetry));
+        let _ = CURRENT_METRICS.set(Mutex::new(first_sample));
+        let (initial_pixels, initial_width, initial_height) = render_current_bitmap();
         // Per-monitor notifications are required before creating the overlay HWND.
         SetProcessDpiAwarenessContext((-4isize) as *mut c_void);
         let instance = GetModuleHandleW(null());
@@ -830,8 +988,8 @@ pub fn run(pixels: &[u8], width: i32, height: i32) -> Result<(), WinError> {
             WS_POPUP,
             FREE_X.load(Ordering::Relaxed),
             FREE_Y.load(Ordering::Relaxed),
-            width,
-            height,
+            initial_width,
+            initial_height,
             null_mut(),
             null_mut(),
             instance,
@@ -843,18 +1001,30 @@ pub fn run(pixels: &[u8], width: i32, height: i32) -> Result<(), WinError> {
         }
 
         OVERLAY_HANDLE.store(hwnd, Ordering::Relaxed);
+        let _ = AI_SNAPSHOT.set(Mutex::new(None));
+        let _ = AI_WORKER.set(Mutex::new(None));
         ALTERNATE_ACCENT.store(false, Ordering::Relaxed);
         DPI_SCALE_PERCENT.store(100, Ordering::Relaxed);
-        let surface_result = present_bitmap(hwnd, pixels, width, height);
+        let surface_result = present_bitmap(hwnd, &initial_pixels, initial_width, initial_height);
         if surface_result.is_err() {
             DestroyWindow(hwnd);
             UnregisterClassW(class_name.as_ptr(), instance);
             return surface_result;
         }
         if SNAP_TO_TASKBAR.load(Ordering::Relaxed) {
-            attach_to_taskbar(hwnd, height);
+            attach_to_taskbar(hwnd, initial_height);
         }
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        start_ai_worker(hwnd);
+        let interval = config_lock()
+            .lock()
+            .map(|c| c.update_interval_ms)
+            .unwrap_or(1000);
+        if SetTimer(hwnd, TELEMETRY_TIMER_ID, interval, null_mut()) == 0 {
+            DestroyWindow(hwnd);
+            UnregisterClassW(class_name.as_ptr(), instance);
+            return Err(last_error("SetTimer"));
+        }
         if !std::env::args().any(|arg| arg == "--startup") {
             open_settings_window(hwnd);
         }
@@ -887,7 +1057,7 @@ impl SingleInstanceLock {
             .collect();
         let handle = unsafe { CreateMutexW(null_mut(), 0, name.as_ptr()) };
         if handle.is_null() {
-            return Err(last_error("CreateMutexW"));
+            return Err(unsafe { last_error("CreateMutexW") });
         }
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             let class: Vec<u16> = "Kil0bitRustOverlayPoT\0".encode_utf16().collect();
@@ -936,8 +1106,101 @@ fn load_config() {
     FREE_Y.store(config.y as i32, Ordering::Relaxed);
     POSITION_LOCKED.store(config.lock_position, Ordering::Relaxed);
     SNAP_TO_TASKBAR.store(config.stick_to_taskbar, Ordering::Relaxed);
+    let _ = set_startup_registration(config.launch_on_startup);
     if let Ok(mut current) = config_lock().lock() {
         *current = config;
+    }
+}
+
+fn set_startup_registration(enabled: bool) -> std::io::Result<()> {
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegCreateKeyExW(
+            key: *mut c_void,
+            subkey: *const u16,
+            reserved: u32,
+            class: *mut u16,
+            options: u32,
+            access: u32,
+            security: *mut c_void,
+            result: *mut *mut c_void,
+            disposition: *mut u32,
+        ) -> i32;
+        fn RegSetValueExW(
+            key: *mut c_void,
+            name: *const u16,
+            reserved: u32,
+            value_type: u32,
+            data: *const u8,
+            data_size: u32,
+        ) -> i32;
+        fn RegDeleteValueW(key: *mut c_void, name: *const u16) -> i32;
+        fn RegCloseKey(key: *mut c_void) -> i32;
+    }
+    const HKEY_CURRENT_USER: *mut c_void = (-2147483647_isize) as *mut c_void;
+    const KEY_SET_VALUE: u32 = 0x0002;
+    const REG_SZ: u32 = 1;
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+    let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
+        .encode_utf16()
+        .collect();
+    let value_name: Vec<u16> = "Kil0bitSystemMonitorRust\0".encode_utf16().collect();
+    let mut key = null_mut();
+    let mut disposition = 0_u32;
+    let open_status = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            null_mut(),
+            0,
+            KEY_SET_VALUE,
+            null_mut(),
+            &mut key,
+            &mut disposition,
+        )
+    };
+    if open_status != 0 {
+        return Err(std::io::Error::from_raw_os_error(open_status));
+    }
+    let status = if enabled {
+        match std::env::current_exe() {
+            Ok(path) => {
+                let command = format!("\"{}\" --startup", path.display());
+                let data: Vec<u16> = command.encode_utf16().chain(Some(0)).collect();
+                unsafe {
+                    RegSetValueExW(
+                        key,
+                        value_name.as_ptr(),
+                        0,
+                        REG_SZ,
+                        data.as_ptr().cast(),
+                        (data.len() * size_of::<u16>()) as u32,
+                    )
+                }
+            }
+            Err(error) => {
+                unsafe {
+                    RegCloseKey(key);
+                }
+                return Err(error);
+            }
+        }
+    } else {
+        let code = unsafe { RegDeleteValueW(key, value_name.as_ptr()) };
+        if code == ERROR_FILE_NOT_FOUND {
+            0
+        } else {
+            code
+        }
+    };
+    unsafe {
+        RegCloseKey(key);
+    }
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(status))
     }
 }
 
@@ -963,8 +1226,49 @@ fn save_position() {
 }
 
 fn render_current_bitmap() -> (Vec<u8>, i32, i32) {
-    let base = super::bitmap::build_demo_bitmap(ALTERNATE_ACCENT.load(Ordering::Relaxed));
-    super::bitmap::scale_bitmap(&base, DPI_SCALE_PERCENT.load(Ordering::Relaxed))
+    let metrics = CURRENT_METRICS
+        .get()
+        .and_then(|state| state.lock().ok().map(|value| value.clone()))
+        .unwrap_or_default();
+    let config = config_lock()
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_default();
+    let (base, width, height) = super::bitmap::build_metrics_bitmap(
+        &metrics,
+        &config,
+        AI_SNAPSHOT
+            .get()
+            .and_then(|v| v.lock().ok())
+            .and_then(|v| v.clone())
+            .as_ref(),
+        ALTERNATE_ACCENT.load(Ordering::Relaxed),
+    );
+    super::bitmap::scale_surface(
+        &base,
+        width,
+        height,
+        DPI_SCALE_PERCENT.load(Ordering::Relaxed),
+    )
+}
+
+fn poll_telemetry(hwnd: Hwnd) {
+    let Some(collector) = TELEMETRY.get() else {
+        return;
+    };
+    let Ok(mut collector) = collector.lock() else {
+        return;
+    };
+    let sample = collector.sample();
+    if let Some(state) = CURRENT_METRICS.get() {
+        if let Ok(mut current) = state.lock() {
+            *current = sample;
+        }
+    }
+    drop(collector);
+    unsafe {
+        refresh_overlay(hwnd);
+    }
 }
 
 unsafe fn refresh_overlay(hwnd: Hwnd) {

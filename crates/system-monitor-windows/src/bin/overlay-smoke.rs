@@ -287,7 +287,20 @@ mod windows_smoke {
         if screen_dc.is_null() {
             return Err("could not capture desktop pixels".into());
         }
-        let glyph_pixel = unsafe { GetPixel(screen_dc, rect.left + 24, rect.top + 15) };
+        let mut glyph_pixel = u32::MAX;
+        'scan: for y in rect.top + 8..rect.bottom - 8 {
+            for x in rect.left + 8..rect.right - 8 {
+                let sample = unsafe { GetPixel(screen_dc, x, y) };
+                if sample != u32::MAX
+                    && sample & 0xff > 210
+                    && (sample >> 8) & 0xff > 210
+                    && (sample >> 16) & 0xff > 210
+                {
+                    glyph_pixel = sample;
+                    break 'scan;
+                }
+            }
+        }
         unsafe { ReleaseDC(std::ptr::null_mut(), screen_dc) };
         if glyph_pixel == u32::MAX
             || glyph_pixel & 0xff < 210

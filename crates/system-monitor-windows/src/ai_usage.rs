@@ -3,8 +3,11 @@
 
 use reqwest::blocking::Client;
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use system_monitor_core::{AiUsageSnapshot, AiUsageWindow};
+use system_monitor_core::{ai_retry_delay_seconds, AiUsageSnapshot, AiUsageWindow};
 
 const OPENCODE_GO_USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
 
@@ -16,6 +19,87 @@ pub enum ProviderError {
     HttpStatus(u16),
     Network,
     MalformedResponse,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ProviderEvent {
+    pub snapshot: Option<AiUsageSnapshot>,
+    pub error: Option<ProviderError>,
+    pub consecutive_failures: u32,
+}
+
+/// Dedicated, single-flight polling worker. HTTP requests are bounded to 15 seconds.
+pub struct AiUsageWorker {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl AiUsageWorker {
+    pub fn start(
+        interval_seconds: u32,
+        store: crate::secret_store::SecretStore,
+        on_event: impl Fn(ProviderEvent) + Send + Sync + 'static,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            let mut last_good: Option<AiUsageSnapshot> = None;
+            let mut failures = 0_u32;
+            while !worker_stop.load(Ordering::Acquire) {
+                let result = store
+                    .load()
+                    .map_err(|_| ProviderError::MissingKey)
+                    .and_then(|key| fetch_opencode_usage(&key));
+                let error = result.as_ref().err().cloned();
+                match result {
+                    Ok(snapshot) => {
+                        last_good = Some(snapshot);
+                        failures = 0;
+                    }
+                    Err(_) => {
+                        failures = failures.saturating_add(1);
+                        if let Some(snapshot) = &mut last_good {
+                            snapshot.stale = true;
+                        }
+                    }
+                }
+                on_event(ProviderEvent {
+                    snapshot: last_good.clone(),
+                    error,
+                    consecutive_failures: failures,
+                });
+                let delay = ai_retry_delay_seconds(interval_seconds, failures);
+                thread::park_timeout(Duration::from_secs(delay as u64));
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    pub fn wake(&self) {
+        if let Some(thread) = &self.thread {
+            thread.thread().unpark();
+        }
+    }
+
+    /// Request shutdown without blocking the UI on an in-flight, bounded HTTP call.
+    pub fn stop(mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+        }
+    }
+}
+
+impl Drop for AiUsageWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+        }
+    }
 }
 
 /// Parse supported current/compatibility response layouts without leaking response contents.
