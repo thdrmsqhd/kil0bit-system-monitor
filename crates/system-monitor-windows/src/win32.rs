@@ -36,6 +36,7 @@ const WM_SETTINGCHANGE: u32 = 0x001A;
 const WM_DPICHANGED: u32 = 0x02E0;
 const WM_COMMAND: u32 = 0x0111;
 const WM_APP_REFRESH: u32 = 0x8001;
+const WM_APP_SHOW_SETTINGS: u32 = 0x8002;
 const GWLP_HWNDPARENT: i32 = -8;
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOZORDER: u32 = 0x0004;
@@ -64,6 +65,7 @@ const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_TABSTOP: u32 = 0x0001_0000;
 const SW_SHOW: i32 = 5;
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
+const ERROR_ALREADY_EXISTS: u32 = 183;
 static POSITION_LOCKED: AtomicBool = AtomicBool::new(false);
 static SNAP_TO_TASKBAR: AtomicBool = AtomicBool::new(true);
 static APPBAR_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -176,6 +178,7 @@ struct BitmapInfo {
 #[link(name = "kernel32")]
 extern "system" {
     fn GetLastError() -> u32;
+    fn CloseHandle(handle: *mut c_void) -> i32;
 }
 
 #[link(name = "user32")]
@@ -248,6 +251,7 @@ extern "system" {
     ) -> i32;
     fn GetModuleHandleW(module_name: *const u16) -> Hinstance;
     fn SetProcessDpiAwarenessContext(context: *mut c_void) -> i32;
+    fn CreateMutexW(attributes: *mut c_void, initial_owner: i32, name: *const u16) -> *mut c_void;
 }
 
 #[link(name = "shell32")]
@@ -295,6 +299,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_APP_REFRESH => {
             refresh_overlay(hwnd);
+            0
+        }
+        WM_APP_SHOW_SETTINGS => {
+            open_settings_window(hwnd);
             0
         }
         WM_DESTROY => {
@@ -784,6 +792,9 @@ unsafe fn show_context_menu(hwnd: Hwnd) {
 
 /// Registers the window class, creates a layered popup, presents one sample frame, and runs its message loop.
 pub fn run(pixels: &[u8], width: i32, height: i32) -> Result<(), WinError> {
+    let Some(_instance_lock) = SingleInstanceLock::acquire()? else {
+        return Ok(());
+    };
     unsafe {
         load_config();
         // Per-monitor notifications are required before creating the overlay HWND.
@@ -844,6 +855,9 @@ pub fn run(pixels: &[u8], width: i32, height: i32) -> Result<(), WinError> {
             attach_to_taskbar(hwnd, height);
         }
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        if !std::env::args().any(|arg| arg == "--startup") {
+            open_settings_window(hwnd);
+        }
 
         let mut message: Message = zeroed();
         loop {
@@ -861,6 +875,43 @@ pub fn run(pixels: &[u8], width: i32, height: i32) -> Result<(), WinError> {
         }
         UnregisterClassW(class_name.as_ptr(), instance);
         Ok(())
+    }
+}
+
+struct SingleInstanceLock(*mut c_void);
+
+impl SingleInstanceLock {
+    fn acquire() -> Result<Option<Self>, WinError> {
+        let name: Vec<u16> = "Local\\Kil0bitSystemMonitorRust-SingleInstance\0"
+            .encode_utf16()
+            .collect();
+        let handle = unsafe { CreateMutexW(null_mut(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            return Err(last_error("CreateMutexW"));
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            let class: Vec<u16> = "Kil0bitRustOverlayPoT\0".encode_utf16().collect();
+            let existing = unsafe { FindWindowW(class.as_ptr(), null()) };
+            if !existing.is_null() {
+                unsafe {
+                    PostMessageW(existing, WM_APP_SHOW_SETTINGS, 0, 0);
+                }
+            }
+            unsafe {
+                CloseHandle(handle);
+            }
+            Ok(None)
+        } else {
+            Ok(Some(Self(handle)))
+        }
+    }
+}
+
+impl Drop for SingleInstanceLock {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
     }
 }
 

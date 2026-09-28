@@ -225,7 +225,7 @@ mod windows_smoke {
             .ok_or("usage: overlay-smoke <path-to-system-monitor-windows.exe>")?;
         let position_file = std::env::temp_dir().join("kil0bit-rust-overlay-pot-position.txt");
         let _ = std::fs::remove_file(&position_file);
-        let mut child = Command::new(executable)
+        let mut child = Command::new(executable.clone())
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -365,6 +365,33 @@ mod windows_smoke {
             let _ = child.wait();
             return Err("Settings HWND was created but is not visible".into());
         }
+        let mut second_instance = Command::new(executable.clone())
+            .arg("--startup")
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("launch second instance: {e}"))?;
+        let second_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = second_instance.try_wait().map_err(|e| e.to_string())? {
+                if !status.success() || child.try_wait().map_err(|e| e.to_string())?.is_some() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("second launch did not forward to the first process cleanly".into());
+                }
+                break;
+            }
+            if Instant::now() >= second_deadline {
+                let _ = second_instance.kill();
+                let _ = second_instance.wait();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("second instance did not exit after activation forwarding".into());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
         unsafe { PostMessageW(settings, WM_CLOSE, 0, 0) };
 
         let taskbar_class: Vec<u16> = "Shell_TrayWnd\0".encode_utf16().collect();
@@ -499,15 +526,14 @@ mod windows_smoke {
                     return Err(format!("overlay exited with status {status}"));
                 }
                 println!(
-                    "PASS: visible layered HWND ({}x{}), desktop glyph #{:02x}{:02x}{:02x}, Settings, snap/free, drag, lock/unlock, graceful shutdown",
+                    "PASS: visible layered HWND ({}x{}), desktop glyph #{:02x}{:02x}{:02x}, Settings, single instance, snap/free, drag, lock/unlock, graceful shutdown",
                     rect.right - rect.left,
                     rect.bottom - rect.top,
                     glyph_pixel & 0xff,
                     (glyph_pixel >> 8) & 0xff,
                     (glyph_pixel >> 16) & 0xff
                 );
-                let _ = std::fs::remove_file(&position_file);
-                return Ok(());
+                break;
             }
             if Instant::now() >= exit_deadline {
                 let _ = child.kill();
@@ -516,6 +542,66 @@ mod windows_smoke {
             }
             thread::sleep(Duration::from_millis(100));
         }
+        let _ = std::fs::remove_file(&position_file);
+        let mut restarted = Command::new(executable)
+            .arg("--startup")
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("restart overlay for position check: {e}"))?;
+        let restart_deadline = Instant::now() + Duration::from_secs(10);
+        let restarted_hwnd = loop {
+            if let Some(status) = restarted.try_wait().map_err(|e| e.to_string())? {
+                return Err(format!("overlay exited during persistence check: {status}"));
+            }
+            let found = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
+            if !found.is_null() {
+                break found;
+            }
+            if Instant::now() >= restart_deadline {
+                let _ = restarted.kill();
+                let _ = restarted.wait();
+                return Err("overlay HWND did not reappear after restart".into());
+            }
+            thread::sleep(Duration::from_millis(100));
+        };
+        let mut restored = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if unsafe { GetWindowRect(restarted_hwnd, &mut restored) } == 0
+            || restored.left != unlocked_again_after.left
+            || restored.top != unlocked_again_after.top
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "free position was not restored after restart: got ({}, {}), expected ({}, {})",
+                restored.left, restored.top, unlocked_again_after.left, unlocked_again_after.top
+            ));
+        }
+        let _ = unsafe { PostMessageW(restarted_hwnd, WM_CLOSE, 0, 0) };
+        let restart_exit_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = restarted.try_wait().map_err(|e| e.to_string())? {
+                if !status.success() {
+                    return Err(format!("restarted overlay exited with status {status}"));
+                }
+                break;
+            }
+            if Instant::now() >= restart_exit_deadline {
+                let _ = restarted.kill();
+                let _ = restarted.wait();
+                return Err("restarted overlay did not exit gracefully".into());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let _ = std::fs::remove_file(&position_file);
+        Ok(())
     }
 }
 
