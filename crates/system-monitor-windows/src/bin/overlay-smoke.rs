@@ -12,10 +12,11 @@ mod windows_smoke {
     const GWL_EXSTYLE: i32 = -20;
     const WS_EX_LAYERED: isize = 0x0008_0000;
     const WM_RBUTTONUP: u32 = 0x0205;
-    const WM_KEYDOWN: u32 = 0x0100;
     const WM_CLOSE: u32 = 0x0010;
     const VK_END: usize = 0x23;
     const VK_RETURN: usize = 0x0D;
+    const INPUT_KEYBOARD: u32 = 1;
+    const KEYEVENTF_KEYUP: u32 = 0x0002;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     #[link(name = "user32")]
@@ -26,6 +27,7 @@ mod windows_smoke {
         fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
         fn PostMessageW(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> i32;
         fn SetCursorPos(x: i32, y: i32) -> i32;
+        fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
     }
 
     #[repr(C)]
@@ -34,6 +36,71 @@ mod windows_smoke {
         top: i32,
         right: i32,
         bottom: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct KeyboardInput {
+        virtual_key: u16,
+        scan_code: u16,
+        flags: u32,
+        time: u32,
+        extra_info: usize,
+    }
+
+    #[repr(C)]
+    union InputData {
+        keyboard: KeyboardInput,
+        padding: [u64; 4],
+    }
+
+    #[repr(C)]
+    struct Input {
+        kind: u32,
+        data: InputData,
+    }
+
+    fn press_key(virtual_key: usize) -> Result<(), String> {
+        let down = Input {
+            kind: INPUT_KEYBOARD,
+            data: InputData {
+                keyboard: KeyboardInput {
+                    virtual_key: virtual_key as u16,
+                    scan_code: 0,
+                    flags: 0,
+                    time: 0,
+                    extra_info: 0,
+                },
+            },
+        };
+        let up = Input {
+            kind: INPUT_KEYBOARD,
+            data: InputData {
+                keyboard: KeyboardInput {
+                    virtual_key: virtual_key as u16,
+                    scan_code: 0,
+                    flags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    extra_info: 0,
+                },
+            },
+        };
+        let events = [down, up];
+        let sent = unsafe {
+            SendInput(
+                events.len() as u32,
+                events.as_ptr(),
+                std::mem::size_of::<Input>() as i32,
+            )
+        };
+        if sent == events.len() as u32 {
+            Ok(())
+        } else {
+            Err(format!(
+                "SendInput inserted {sent}/{} key events",
+                events.len()
+            ))
+        }
     }
 
     pub fn run() -> Result<(), String> {
@@ -109,7 +176,7 @@ mod windows_smoke {
             let _ = child.wait();
             return Err("could not open overlay context menu".into());
         }
-        let menu = loop {
+        let _menu = loop {
             let found = unsafe { FindWindowW(menu_class.as_ptr(), std::ptr::null()) };
             if !found.is_null() {
                 break found;
@@ -122,9 +189,16 @@ mod windows_smoke {
             }
             thread::sleep(Duration::from_millis(50));
         };
-        unsafe {
-            PostMessageW(menu, WM_KEYDOWN, VK_END, 0);
-            PostMessageW(menu, WM_KEYDOWN, VK_RETURN, 0);
+        if let Err(error) = press_key(VK_END) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        thread::sleep(Duration::from_millis(100));
+        if let Err(error) = press_key(VK_RETURN) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
         }
 
         let settings_deadline = Instant::now() + Duration::from_secs(3);
