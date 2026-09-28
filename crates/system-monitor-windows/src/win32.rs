@@ -92,6 +92,7 @@ static APPBAR_REGISTERED: AtomicBool = AtomicBool::new(false);
 static FREE_X: AtomicI32 = AtomicI32::new(100);
 static FREE_Y: AtomicI32 = AtomicI32::new(100);
 static ALTERNATE_ACCENT: AtomicBool = AtomicBool::new(false);
+static FULLSCREEN_HIDDEN: AtomicBool = AtomicBool::new(false);
 static DPI_SCALE_PERCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
 static CONFIG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 static APP_CONFIG: OnceLock<Mutex<AppConfig>> = OnceLock::new();
@@ -273,8 +274,11 @@ extern "system" {
     ) -> u32;
     fn DestroyMenu(menu: *mut c_void) -> i32;
     fn FindWindowW(class_name: *const u16, window_name: *const u16) -> Hwnd;
+    fn GetForegroundWindow() -> Hwnd;
     fn MessageBoxW(hwnd: Hwnd, text: *const u16, caption: *const u16, flags: u32) -> i32;
     fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
+    fn GetClassNameW(hwnd: Hwnd, class_name: *mut u16, max_count: i32) -> i32;
+    fn GetSystemMetrics(index: i32) -> i32;
     fn SetWindowPos(
         hwnd: Hwnd,
         insert_after: Hwnd,
@@ -1723,6 +1727,7 @@ fn poll_telemetry(hwnd: Hwnd) {
     }
     drop(collector);
     unsafe {
+        update_fullscreen_visibility(hwnd);
         refresh_overlay(hwnd);
     }
 }
@@ -1732,12 +1737,69 @@ unsafe fn refresh_overlay(hwnd: Hwnd) {
         .lock()
         .map(|config| config.show_overlay)
         .unwrap_or(true);
-    if !visible {
+    if !visible || FULLSCREEN_HIDDEN.load(Ordering::Relaxed) {
         ShowWindow(hwnd, 0);
         return;
     }
     let (pixels, width, height) = render_current_bitmap();
     let _ = present_bitmap(hwnd, &pixels, width, height);
+}
+
+unsafe fn update_fullscreen_visibility(hwnd: Hwnd) {
+    let (enabled, app_visible) = config_lock()
+        .lock()
+        .map(|c| (c.hide_on_fullscreen, c.show_overlay))
+        .unwrap_or((false, true));
+    let foreground = GetForegroundWindow();
+    let mut hidden = false;
+    if enabled
+        && app_visible
+        && !foreground.is_null()
+        && foreground != hwnd
+        && foreground != SETTINGS_HANDLE.load(Ordering::Relaxed)
+    {
+        let mut class_name = [0_u16; 128];
+        let length = GetClassNameW(foreground, class_name.as_mut_ptr(), class_name.len() as i32)
+            .max(0) as usize;
+        let class = String::from_utf16_lossy(&class_name[..length]);
+        let shell_exempt = [
+            "Shell_TrayWnd",
+            "Progman",
+            "WorkerW",
+            "MultitaskingViewFrame",
+            "XamlExplorerHostIslandWindow",
+        ]
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(&class));
+        if !shell_exempt {
+            let mut rect = Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            let screen_width = GetSystemMetrics(0);
+            let screen_height = GetSystemMetrics(1);
+            hidden = screen_width > 0
+                && screen_height > 0
+                && GetWindowRect(foreground, &mut rect) != 0
+                && rect.left <= 0
+                && rect.top <= 0
+                && rect.right >= screen_width
+                && rect.bottom >= screen_height;
+        }
+    }
+    let previous = FULLSCREEN_HIDDEN.swap(hidden, Ordering::Relaxed);
+    if previous != hidden {
+        if hidden {
+            ShowWindow(hwnd, 0);
+        } else if app_visible {
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        if !hidden && app_visible {
+            refresh_overlay(hwnd);
+        }
+    }
 }
 
 unsafe fn present_bitmap(
