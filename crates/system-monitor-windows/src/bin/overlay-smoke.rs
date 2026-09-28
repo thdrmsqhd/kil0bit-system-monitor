@@ -29,6 +29,10 @@ mod windows_smoke {
         fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
         fn GetDC(hwnd: Hwnd) -> Hwnd;
         fn ReleaseDC(hwnd: Hwnd, dc: Hwnd) -> i32;
+    }
+
+    #[link(name = "gdi32")]
+    extern "system" {
         fn GetPixel(dc: Hwnd, x: i32, y: i32) -> u32;
     }
 
