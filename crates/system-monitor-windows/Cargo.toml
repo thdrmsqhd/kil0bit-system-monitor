@@ -8,6 +8,10 @@ license.workspace = true
 win32-api-check = []
 
 [dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde_json = "1.0.151"
+sysinfo = "0.38"
 system-monitor-core = { path = "../system-monitor-core" }
+zeroize = "1"
 
 # Add Win32 bindings with the first native-window implementation in Phase 1.

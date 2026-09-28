@@ -4,11 +4,12 @@
 
 use std::ffi::c_void;
 use std::fmt;
-use std::fs;
-use std::io::Write;
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Mutex, OnceLock};
+use system_monitor_core::{config_store, AppConfig};
+use zeroize::Zeroize;
 
 pub type Hwnd = *mut c_void;
 type Hinstance = *mut c_void;
@@ -53,6 +54,10 @@ const MENU_EXIT: u32 = 2;
 const MENU_TOGGLE_SNAP: u32 = 3;
 const MENU_SETTINGS: u32 = 4;
 const SETTINGS_TOGGLE_ACCENT: usize = 1001;
+const SETTINGS_SAVE_OPENCODE_KEY: usize = 1002;
+const SETTINGS_REMOVE_OPENCODE_KEY: usize = 1003;
+const WS_BORDER: u32 = 0x0080_0000;
+const ES_PASSWORD: u32 = 0x0020;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
 const WS_CHILD: u32 = 0x4000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
@@ -66,9 +71,15 @@ static FREE_X: AtomicI32 = AtomicI32::new(100);
 static FREE_Y: AtomicI32 = AtomicI32::new(100);
 static ALTERNATE_ACCENT: AtomicBool = AtomicBool::new(false);
 static DPI_SCALE_PERCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+static CONFIG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+static APP_CONFIG: OnceLock<Mutex<AppConfig>> = OnceLock::new();
 static OVERLAY_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static SETTINGS_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static AI_KEY_EDIT: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static AI_KEY_STATUS: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 const VK_ESCAPE: usize = 0x1B;
 const SW_SHOWNOACTIVATE: i32 = 4;
@@ -219,6 +230,9 @@ extern "system" {
         flags: u32,
     ) -> i32;
     fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: isize) -> isize;
+    fn GetWindowTextLengthW(hwnd: Hwnd) -> i32;
+    fn GetWindowTextW(hwnd: Hwnd, text: *mut u16, max_count: i32) -> i32;
+    fn SetWindowTextW(hwnd: Hwnd, text: *const u16) -> i32;
     fn GetDC(hwnd: Hwnd) -> Hdc;
     fn ReleaseDC(hwnd: Hwnd, dc: Hdc) -> i32;
     fn UpdateLayeredWindow(
@@ -390,6 +404,20 @@ unsafe extern "system" fn settings_window_proc(
             }
             0
         }
+        WM_COMMAND if (wparam & 0xffff) == SETTINGS_SAVE_OPENCODE_KEY => {
+            save_opencode_key_from_settings();
+            0
+        }
+        WM_COMMAND if (wparam & 0xffff) == SETTINGS_REMOVE_OPENCODE_KEY => {
+            let status = match crate::secret_store::SecretStore::opencode()
+                .and_then(|store| store.remove())
+            {
+                Ok(()) => "OpenCode key removed",
+                Err(_) => "Could not remove OpenCode key",
+            };
+            set_ai_key_status(status);
+            0
+        }
         WM_CLOSE => {
             DestroyWindow(hwnd);
             0
@@ -398,6 +426,8 @@ unsafe extern "system" fn settings_window_proc(
             SETTINGS_HANDLE
                 .compare_exchange(hwnd, null_mut(), Ordering::Relaxed, Ordering::Relaxed)
                 .ok();
+            AI_KEY_EDIT.store(null_mut(), Ordering::Relaxed);
+            AI_KEY_STATUS.store(null_mut(), Ordering::Relaxed);
             0
         }
         _ => DefWindowProcW(hwnd, message, wparam, lparam),
@@ -435,8 +465,8 @@ unsafe fn open_settings_window(owner: Hwnd) {
         WS_OVERLAPPEDWINDOW,
         300,
         100,
-        320,
-        150,
+        520,
+        300,
         owner,
         null_mut(),
         instance,
@@ -462,8 +492,125 @@ unsafe fn open_settings_window(owner: Hwnd) {
         instance,
         null_mut(),
     );
+    let label_class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+    let ai_label: Vec<u16> = "OpenCode Go API key (stored with Windows DPAPI):\0"
+        .encode_utf16()
+        .collect();
+    CreateWindowExW(
+        0,
+        label_class.as_ptr(),
+        ai_label.as_ptr(),
+        WS_CHILD | WS_VISIBLE,
+        24,
+        78,
+        450,
+        24,
+        window,
+        null_mut(),
+        instance,
+        null_mut(),
+    );
+    let edit_class: Vec<u16> = "EDIT\0".encode_utf16().collect();
+    let empty: Vec<u16> = "\0".encode_utf16().collect();
+    let edit = CreateWindowExW(
+        WS_BORDER,
+        edit_class.as_ptr(),
+        empty.as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_PASSWORD,
+        24,
+        106,
+        450,
+        28,
+        window,
+        null_mut(),
+        instance,
+        null_mut(),
+    );
+    AI_KEY_EDIT.store(edit, Ordering::Relaxed);
+    let save_text: Vec<u16> = "Save key\0".encode_utf16().collect();
+    CreateWindowExW(
+        0,
+        button_class.as_ptr(),
+        save_text.as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        24,
+        146,
+        120,
+        32,
+        window,
+        SETTINGS_SAVE_OPENCODE_KEY as *mut c_void,
+        instance,
+        null_mut(),
+    );
+    let remove_text: Vec<u16> = "Remove key\0".encode_utf16().collect();
+    CreateWindowExW(
+        0,
+        button_class.as_ptr(),
+        remove_text.as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        154,
+        146,
+        120,
+        32,
+        window,
+        SETTINGS_REMOVE_OPENCODE_KEY as *mut c_void,
+        instance,
+        null_mut(),
+    );
+    let status_text: Vec<u16> =
+        if crate::secret_store::SecretStore::opencode().is_ok_and(|store| store.exists()) {
+            "OpenCode key is saved\0".encode_utf16().collect()
+        } else {
+            "OpenCode key is not saved\0".encode_utf16().collect()
+        };
+    let status = CreateWindowExW(
+        0,
+        label_class.as_ptr(),
+        status_text.as_ptr(),
+        WS_CHILD | WS_VISIBLE,
+        24,
+        190,
+        450,
+        24,
+        window,
+        null_mut(),
+        instance,
+        null_mut(),
+    );
+    AI_KEY_STATUS.store(status, Ordering::Relaxed);
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
+}
+
+unsafe fn save_opencode_key_from_settings() {
+    let edit = AI_KEY_EDIT.load(Ordering::Relaxed);
+    if edit.is_null() {
+        return;
+    }
+    let length = GetWindowTextLengthW(edit).clamp(0, 4096) as usize;
+    let mut buffer = vec![0_u16; length + 1];
+    let actual = GetWindowTextW(edit, buffer.as_mut_ptr(), buffer.len() as i32).max(0) as usize;
+    let mut key = String::from_utf16_lossy(&buffer[..actual]);
+    let result = crate::secret_store::SecretStore::opencode().and_then(|store| store.save(&key));
+    key.zeroize();
+    buffer.zeroize();
+    let empty: Vec<u16> = "\0".encode_utf16().collect();
+    SetWindowTextW(edit, empty.as_ptr());
+    match result {
+        Ok(()) => set_ai_key_status("OpenCode key saved for this Windows user"),
+        Err(_) => set_ai_key_status("Could not save OpenCode key"),
+    }
+}
+
+fn set_ai_key_status(text: &str) {
+    let status = AI_KEY_STATUS.load(Ordering::Relaxed);
+    if status.is_null() {
+        return;
+    }
+    let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        SetWindowTextW(status, wide.as_ptr());
+    }
 }
 
 unsafe fn taskbar_window() -> Hwnd {
@@ -615,6 +762,7 @@ unsafe fn show_context_menu(hwnd: Hwnd) {
         match selected {
             MENU_TOGGLE_LOCK => {
                 POSITION_LOCKED.store(!locked, Ordering::Relaxed);
+                save_config_flags();
             }
             MENU_EXIT => {
                 DestroyWindow(hwnd);
@@ -637,7 +785,7 @@ unsafe fn show_context_menu(hwnd: Hwnd) {
 /// Registers the window class, creates a layered popup, presents one sample frame, and runs its message loop.
 pub fn run(pixels: &[u8], width: i32, height: i32) -> Result<(), WinError> {
     unsafe {
-        load_position();
+        load_config();
         // Per-monitor notifications are required before creating the overlay HWND.
         SetProcessDpiAwarenessContext((-4isize) as *mut c_void);
         let instance = GetModuleHandleW(null());
@@ -692,9 +840,9 @@ pub fn run(pixels: &[u8], width: i32, height: i32) -> Result<(), WinError> {
             UnregisterClassW(class_name.as_ptr(), instance);
             return surface_result;
         }
-        SNAP_TO_TASKBAR.store(true, Ordering::Relaxed);
-        POSITION_LOCKED.store(false, Ordering::Relaxed);
-        attach_to_taskbar(hwnd, height);
+        if SNAP_TO_TASKBAR.load(Ordering::Relaxed) {
+            attach_to_taskbar(hwnd, height);
+        }
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
         let mut message: Message = zeroed();
@@ -716,30 +864,50 @@ pub fn run(pixels: &[u8], width: i32, height: i32) -> Result<(), WinError> {
     }
 }
 
-fn position_file() -> std::path::PathBuf {
-    std::env::temp_dir().join("kil0bit-rust-overlay-pot-position.txt")
+fn config_path() -> std::path::PathBuf {
+    CONFIG_PATH
+        .get_or_init(|| {
+            let root = std::env::var_os("APPDATA")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            root.join("Kil0bitSystemMonitorRust").join("config.json")
+        })
+        .clone()
 }
 
-fn load_position() {
-    if let Ok(contents) = fs::read_to_string(position_file()) {
-        let mut values = contents.lines().filter_map(|line| line.parse::<i32>().ok());
-        if let (Some(x), Some(y)) = (values.next(), values.next()) {
-            FREE_X.store(x.clamp(-32768, 32767), Ordering::Relaxed);
-            FREE_Y.store(y.clamp(-32768, 32767), Ordering::Relaxed);
-        }
+fn config_lock() -> &'static Mutex<AppConfig> {
+    APP_CONFIG.get_or_init(|| Mutex::new(AppConfig::default()))
+}
+
+fn load_config() {
+    let config = config_store::load(&config_path());
+    FREE_X.store(config.x as i32, Ordering::Relaxed);
+    FREE_Y.store(config.y as i32, Ordering::Relaxed);
+    POSITION_LOCKED.store(config.lock_position, Ordering::Relaxed);
+    SNAP_TO_TASKBAR.store(config.stick_to_taskbar, Ordering::Relaxed);
+    if let Ok(mut current) = config_lock().lock() {
+        *current = config;
+    }
+}
+
+fn save_config_flags() {
+    if let Ok(mut config) = config_lock().lock() {
+        config.lock_position = POSITION_LOCKED.load(Ordering::Relaxed);
+        config.stick_to_taskbar = SNAP_TO_TASKBAR.load(Ordering::Relaxed);
+        config.x = FREE_X.load(Ordering::Relaxed) as f64;
+        config.y = FREE_Y.load(Ordering::Relaxed) as f64;
+        let _ = config_store::save(&config_path(), &config);
     }
 }
 
 fn save_position() {
-    let path = position_file();
-    if let Ok(mut file) = fs::File::create(path) {
-        let _ = writeln!(
-            file,
-            "{}\n{}",
-            FREE_X.load(Ordering::Relaxed),
-            FREE_Y.load(Ordering::Relaxed)
-        );
-        let _ = file.flush();
+    if let Ok(mut config) = config_lock().lock() {
+        config.x = FREE_X.load(Ordering::Relaxed) as f64;
+        if !SNAP_TO_TASKBAR.load(Ordering::Relaxed) {
+            config.y = FREE_Y.load(Ordering::Relaxed) as f64;
+        }
+        config.stick_to_taskbar = SNAP_TO_TASKBAR.load(Ordering::Relaxed);
+        let _ = config_store::save(&config_path(), &config);
     }
 }
 
