@@ -43,6 +43,8 @@ const GWLP_HWNDPARENT: i32 = -8;
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOZORDER: u32 = 0x0004;
 const SWP_NOACTIVATE: u32 = 0x0010;
+const HWND_TOPMOST: Hwnd = (-1_isize) as Hwnd;
+const HWND_NOTOPMOST: Hwnd = (-2_isize) as Hwnd;
 const ABM_NEW: u32 = 0x0000_0000;
 const ABM_REMOVE: u32 = 0x0000_0001;
 const ABM_WINDOWPOSCHANGED: u32 = 0x0000_0009;
@@ -56,6 +58,9 @@ const MENU_TOGGLE_LOCK: u32 = 1;
 const MENU_EXIT: u32 = 2;
 const MENU_TOGGLE_SNAP: u32 = 3;
 const MENU_SETTINGS: u32 = 4;
+const MENU_TASK_MANAGER: u32 = 5;
+const MENU_TOGGLE_TOPMOST: u32 = 6;
+const MENU_ABOUT: u32 = 7;
 const SETTINGS_TOGGLE_ACCENT: usize = 1001;
 const SETTINGS_SAVE_OPENCODE_KEY: usize = 1002;
 const SETTINGS_REMOVE_OPENCODE_KEY: usize = 1003;
@@ -252,6 +257,7 @@ extern "system" {
     ) -> u32;
     fn DestroyMenu(menu: *mut c_void) -> i32;
     fn FindWindowW(class_name: *const u16, window_name: *const u16) -> Hwnd;
+    fn MessageBoxW(hwnd: Hwnd, text: *const u16, caption: *const u16, flags: u32) -> i32;
     fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
     fn SetWindowPos(
         hwnd: Hwnd,
@@ -290,6 +296,14 @@ extern "system" {
 #[link(name = "shell32")]
 extern "system" {
     fn SHAppBarMessage(message: u32, data: *mut AppBarData) -> usize;
+    fn ShellExecuteW(
+        hwnd: Hwnd,
+        operation: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show: i32,
+    ) -> Hinstance;
 }
 
 #[link(name = "gdi32")]
@@ -1127,6 +1141,29 @@ unsafe fn show_context_menu(hwnd: Hwnd) {
         MENU_SETTINGS as usize,
         settings_text.as_ptr(),
     );
+    let config = config_lock().lock().map(|c| c.clone()).unwrap_or_default();
+    let topmost_text: Vec<u16> = if config.always_on_top {
+        "Disable Keep on Top\0"
+    } else {
+        "Keep on Top\0"
+    }
+    .encode_utf16()
+    .collect();
+    AppendMenuW(
+        menu,
+        MF_STRING | if config.always_on_top { MF_CHECKED } else { 0 },
+        MENU_TOGGLE_TOPMOST as usize,
+        topmost_text.as_ptr(),
+    );
+    let task_text: Vec<u16> = "Task Manager\0".encode_utf16().collect();
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_TASK_MANAGER as usize,
+        task_text.as_ptr(),
+    );
+    let about_text: Vec<u16> = "About\0".encode_utf16().collect();
+    AppendMenuW(menu, MF_STRING, MENU_ABOUT as usize, about_text.as_ptr());
     let mut point = Point { x: 0, y: 0 };
     if GetCursorPos(&mut point) != 0 {
         let selected = TrackPopupMenu(
@@ -1155,6 +1192,46 @@ unsafe fn show_context_menu(hwnd: Hwnd) {
                 save_position();
             }
             MENU_SETTINGS => open_settings_window(hwnd),
+            MENU_TASK_MANAGER => {
+                let operation: Vec<u16> = "open\0".encode_utf16().collect();
+                let executable: Vec<u16> = "taskmgr.exe\0".encode_utf16().collect();
+                ShellExecuteW(
+                    hwnd,
+                    operation.as_ptr(),
+                    executable.as_ptr(),
+                    null(),
+                    null(),
+                    SW_SHOW,
+                );
+            }
+            MENU_TOGGLE_TOPMOST => {
+                if let Ok(mut config) = config_lock().lock() {
+                    config.always_on_top = !config.always_on_top;
+                    let insert_after = if config.always_on_top {
+                        HWND_TOPMOST
+                    } else {
+                        HWND_NOTOPMOST
+                    };
+                    SetWindowPos(
+                        hwnd,
+                        insert_after,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOACTIVATE | 0x0002,
+                    );
+                    let _ = config_store::save(&config_path(), &config);
+                }
+            }
+            MENU_ABOUT => {
+                let text: Vec<u16> =
+                    "Kil0bit System Monitor Rust port\nA native Windows telemetry overlay.\0"
+                        .encode_utf16()
+                        .collect();
+                let caption: Vec<u16> = "About Kil0bit System Monitor\0".encode_utf16().collect();
+                MessageBoxW(hwnd, text.as_ptr(), caption.as_ptr(), 0);
+            }
             _ => {}
         }
     }
@@ -1199,8 +1276,12 @@ pub fn run(_pixels: &[u8], _width: i32, _height: i32) -> Result<(), WinError> {
             return Err(last_error("RegisterClassW"));
         }
 
+        let always_on_top = config_lock()
+            .lock()
+            .map(|c| c.always_on_top)
+            .unwrap_or(true);
         let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW | if always_on_top { WS_EX_TOPMOST } else { 0 },
             class_name.as_ptr(),
             window_name.as_ptr(),
             WS_POPUP,
