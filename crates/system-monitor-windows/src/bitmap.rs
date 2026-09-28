@@ -278,6 +278,7 @@ pub fn build_demo_bitmap(alternate_accent: bool) -> Vec<u8> {
 }
 
 /// Scales a premultiplied BGRA surface with nearest-neighbor sampling.
+#[cfg(any(not(windows), test))]
 pub fn scale_bitmap(pixels: &[u8], scale_percent: u32) -> (Vec<u8>, i32, i32) {
     scale_surface(pixels, WIDTH, HEIGHT, scale_percent)
 }

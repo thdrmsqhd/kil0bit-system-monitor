@@ -3,7 +3,7 @@
 
 use reqwest::blocking::Client;
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -31,6 +31,7 @@ pub struct ProviderEvent {
 /// Dedicated, single-flight polling worker. HTTP requests are bounded to 15 seconds.
 pub struct AiUsageWorker {
     stop: Arc<AtomicBool>,
+    interval_seconds: Arc<AtomicU32>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -41,7 +42,9 @@ impl AiUsageWorker {
         on_event: impl Fn(ProviderEvent) + Send + Sync + 'static,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
+        let interval_seconds = Arc::new(AtomicU32::new(interval_seconds.clamp(60, 3600)));
         let worker_stop = Arc::clone(&stop);
+        let worker_interval = Arc::clone(&interval_seconds);
         let thread = thread::spawn(move || {
             let mut last_good: Option<AiUsageSnapshot> = None;
             let mut failures = 0_u32;
@@ -68,12 +71,14 @@ impl AiUsageWorker {
                     error,
                     consecutive_failures: failures,
                 });
-                let delay = ai_retry_delay_seconds(interval_seconds, failures);
+                let delay =
+                    ai_retry_delay_seconds(worker_interval.load(Ordering::Relaxed), failures);
                 thread::park_timeout(Duration::from_secs(delay as u64));
             }
         });
         Self {
             stop,
+            interval_seconds,
             thread: Some(thread),
         }
     }
@@ -82,6 +87,12 @@ impl AiUsageWorker {
         if let Some(thread) = &self.thread {
             thread.thread().unpark();
         }
+    }
+
+    pub fn set_interval(&self, seconds: u32) {
+        self.interval_seconds
+            .store(seconds.clamp(60, 3600), Ordering::Relaxed);
+        self.wake();
     }
 
     /// Request shutdown without blocking the UI on an in-flight, bounded HTTP call.

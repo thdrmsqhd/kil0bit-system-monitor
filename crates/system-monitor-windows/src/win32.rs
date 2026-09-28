@@ -60,10 +60,17 @@ const SETTINGS_TOGGLE_ACCENT: usize = 1001;
 const SETTINGS_SAVE_OPENCODE_KEY: usize = 1002;
 const SETTINGS_REMOVE_OPENCODE_KEY: usize = 1003;
 const SETTINGS_TOGGLE_STARTUP: usize = 1004;
+const SETTINGS_AI_ROLLING: usize = 1005;
+const SETTINGS_AI_WEEKLY: usize = 1006;
+const SETTINGS_AI_MONTHLY: usize = 1007;
+const SETTINGS_AI_USED: usize = 1008;
+const SETTINGS_AI_INTERVAL: usize = 1009;
+const AI_INTERVALS: [u32; 4] = [60, 300, 900, 3600];
 const BM_GETCHECK: u32 = 0x00F0;
 const BM_SETCHECK: u32 = 0x00F1;
 const BST_CHECKED: usize = 1;
 const WS_BORDER: u32 = 0x0080_0000;
+const WS_VSCROLL: u32 = 0x0020_0000;
 const ES_PASSWORD: u32 = 0x0020;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
 const WS_CHILD: u32 = 0x4000_0000;
@@ -94,6 +101,14 @@ static AI_KEY_EDIT: std::sync::atomic::AtomicPtr<c_void> =
 static AI_KEY_STATUS: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static STARTUP_CHECKBOX: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static AI_OPTION_CONTROLS: [std::sync::atomic::AtomicPtr<c_void>; 4] = [
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+];
+static AI_INTERVAL_COMBO: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 const VK_ESCAPE: usize = 0x1B;
 const SW_SHOWNOACTIVATE: i32 = 4;
@@ -490,6 +505,10 @@ unsafe extern "system" fn settings_window_proc(
             }
             0
         }
+        WM_COMMAND if (SETTINGS_AI_ROLLING..=SETTINGS_AI_INTERVAL).contains(&(wparam & 0xffff)) => {
+            save_ai_options_from_settings();
+            0
+        }
         WM_CLOSE => {
             DestroyWindow(hwnd);
             0
@@ -501,6 +520,10 @@ unsafe extern "system" fn settings_window_proc(
             AI_KEY_EDIT.store(null_mut(), Ordering::Relaxed);
             AI_KEY_STATUS.store(null_mut(), Ordering::Relaxed);
             STARTUP_CHECKBOX.store(null_mut(), Ordering::Relaxed);
+            for control in &AI_OPTION_CONTROLS {
+                control.store(null_mut(), Ordering::Relaxed);
+            }
+            AI_INTERVAL_COMBO.store(null_mut(), Ordering::Relaxed);
             0
         }
         _ => DefWindowProcW(hwnd, message, wparam, lparam),
@@ -538,8 +561,8 @@ unsafe fn open_settings_window(owner: Hwnd) {
         WS_OVERLAPPEDWINDOW,
         300,
         100,
-        520,
-        300,
+        560,
+        430,
         owner,
         null_mut(),
         instance,
@@ -651,6 +674,90 @@ unsafe fn open_settings_window(owner: Hwnd) {
         null_mut(),
     );
     AI_KEY_STATUS.store(status, Ordering::Relaxed);
+    let config = config_lock().lock().map(|c| c.clone()).unwrap_or_default();
+    let options = [
+        (
+            SETTINGS_AI_ROLLING,
+            "Show OpenCode 5 hour window",
+            config.opencode_show_rolling,
+        ),
+        (
+            SETTINGS_AI_WEEKLY,
+            "Show weekly window",
+            config.opencode_show_weekly,
+        ),
+        (
+            SETTINGS_AI_MONTHLY,
+            "Show monthly window",
+            config.opencode_show_monthly,
+        ),
+        (
+            SETTINGS_AI_USED,
+            "Show used percent (unchecked = remaining)",
+            config.ai_show_used_percent,
+        ),
+    ];
+    for (index, (id, caption, checked)) in options.iter().enumerate() {
+        let text: Vec<u16> = format!("{caption}\0").encode_utf16().collect();
+        let control = CreateWindowExW(
+            0,
+            button_class.as_ptr(),
+            text.as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0003,
+            24 + (index as i32 % 2) * 260,
+            226 + (index as i32 / 2) * 32,
+            250,
+            26,
+            window,
+            *id as *mut c_void,
+            instance,
+            null_mut(),
+        );
+        AI_OPTION_CONTROLS[index].store(control, Ordering::Relaxed);
+        if *checked {
+            SendMessageW(control, BM_SETCHECK, BST_CHECKED, 0);
+        }
+    }
+    let interval_label: Vec<u16> = "Poll interval: ".encode_utf16().collect();
+    CreateWindowExW(
+        0,
+        label_class.as_ptr(),
+        interval_label.as_ptr(),
+        WS_CHILD | WS_VISIBLE,
+        24,
+        296,
+        110,
+        24,
+        window,
+        null_mut(),
+        instance,
+        null_mut(),
+    );
+    let combo_class: Vec<u16> = "COMBOBOX\0".encode_utf16().collect();
+    let combo = CreateWindowExW(
+        WS_VSCROLL,
+        combo_class.as_ptr(),
+        empty.as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0003,
+        140,
+        292,
+        180,
+        120,
+        window,
+        SETTINGS_AI_INTERVAL as *mut c_void,
+        instance,
+        null_mut(),
+    );
+    for caption in ["1 minute", "5 minutes", "15 minutes", "60 minutes"] {
+        let item: Vec<u16> = caption.encode_utf16().chain(Some(0)).collect();
+        SendMessageW(combo, 0x0143, 0, item.as_ptr() as isize);
+    }
+    let interval_index = AI_INTERVALS
+        .iter()
+        .position(|value| *value == config.ai_poll_interval_seconds)
+        .unwrap_or(1);
+    SendMessageW(combo, 0x014E, interval_index, 0);
+    AI_INTERVAL_COMBO.store(combo, Ordering::Relaxed);
     let startup_text: Vec<u16> = "Launch Rust monitor when I sign in\0"
         .encode_utf16()
         .collect();
@@ -660,7 +767,7 @@ unsafe fn open_settings_window(owner: Hwnd) {
         startup_text.as_ptr(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0003,
         24,
-        224,
+        344,
         340,
         26,
         window,
@@ -750,6 +857,50 @@ fn start_ai_worker(hwnd: Hwnd) {
         },
     );
     *slot = Some(worker);
+}
+
+fn save_ai_options_from_settings() {
+    let checked: Vec<bool> = AI_OPTION_CONTROLS
+        .iter()
+        .map(|control| {
+            let handle = control.load(Ordering::Relaxed);
+            !handle.is_null()
+                && unsafe { SendMessageW(handle, BM_GETCHECK, 0, 0) } == BST_CHECKED as isize
+        })
+        .collect();
+    let combo = AI_INTERVAL_COMBO.load(Ordering::Relaxed);
+    let selected = if combo.is_null() {
+        -1
+    } else {
+        unsafe { SendMessageW(combo, 0x0147, 0, 0) as i32 }
+    };
+    let interval = AI_INTERVALS
+        .get(selected.max(0) as usize)
+        .copied()
+        .unwrap_or(300);
+    if let Ok(mut config) = config_lock().lock() {
+        if checked.len() == 4 {
+            config.opencode_show_rolling = checked[0];
+            config.opencode_show_weekly = checked[1];
+            config.opencode_show_monthly = checked[2];
+            config.ai_show_used_percent = checked[3];
+        }
+        config.ai_poll_interval_seconds = interval;
+        let _ = config_store::save(&config_path(), &config);
+    }
+    if let Some(workers) = AI_WORKER.get() {
+        if let Ok(slot) = workers.lock() {
+            if let Some(worker) = slot.as_ref() {
+                worker.set_interval(interval);
+            }
+        }
+    }
+    let overlay = OVERLAY_HANDLE.load(Ordering::Relaxed);
+    if !overlay.is_null() {
+        unsafe {
+            PostMessageW(overlay, WM_APP_REFRESH, 0, 0);
+        }
+    }
 }
 
 fn set_ai_key_status(text: &str) {
