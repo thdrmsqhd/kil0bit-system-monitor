@@ -881,10 +881,8 @@ fn start_ai_worker(hwnd: Hwnd) {
         }
         Some(store)
     };
-    if config.codex_enabled {
-        if super::ai_usage::codex_auth_path().is_err() {
-            return;
-        }
+    if config.codex_enabled && super::ai_usage::codex_auth_path().is_err() {
+        return;
     }
     let Ok(mut slot) = AI_WORKER.get_or_init(|| Mutex::new(None)).lock() else {
         return;
