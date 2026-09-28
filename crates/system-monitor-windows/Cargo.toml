@@ -1,0 +1,13 @@
+[package]
+name = "system-monitor-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+win32-api-check = []
+
+[dependencies]
+system-monitor-core = { path = "../system-monitor-core" }
+
+# Add Win32 bindings with the first native-window implementation in Phase 1.
