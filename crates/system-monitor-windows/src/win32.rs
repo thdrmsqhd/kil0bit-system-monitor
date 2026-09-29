@@ -154,6 +154,13 @@ static MAINTENANCE_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static APPEARANCE_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
+static PALETTE_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static PALETTE_EDITS: [std::sync::atomic::AtomicPtr<c_void>; 8] = [
+    const { std::sync::atomic::AtomicPtr::new(null_mut()) }; 8
+];
+const APPEARANCE_PALETTE: usize = 1820;
+const PALETTE_SAVE: usize = 1821;
 static APPEARANCE_EDITS: [std::sync::atomic::AtomicPtr<c_void>; 8] = [
     std::sync::atomic::AtomicPtr::new(null_mut()),
     std::sync::atomic::AtomicPtr::new(null_mut()),
@@ -1407,6 +1414,10 @@ unsafe extern "system" fn appearance_window_proc(
     hwnd: Hwnd, message: u32, wparam: usize, lparam: isize,
 ) -> Lresult {
     match message {
+        WM_COMMAND if (wparam & 0xffff) == APPEARANCE_PALETTE => {
+            open_palette_window(hwnd);
+            0
+        }
         WM_COMMAND if (wparam & 0xffff) == APPEARANCE_SAVE => {
             let values: Vec<String> = APPEARANCE_EDITS.iter()
                 .map(|control| appearance_text(control.load(Ordering::Relaxed))).collect();
@@ -1507,6 +1518,83 @@ unsafe fn open_appearance_window(owner: Hwnd) {
     }
     devices_child(window, "BUTTON", "Save appearance", APPEARANCE_SAVE,
         20, 480, 200, 36, WS_TABSTOP);
+    devices_child(window, "BUTTON", "Section colors...", APPEARANCE_PALETTE,
+        235, 480, 195, 36, WS_TABSTOP);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+}
+
+unsafe extern "system" fn palette_window_proc(
+    hwnd: Hwnd, message: u32, wparam: usize, lparam: isize,
+) -> Lresult {
+    match message {
+        WM_COMMAND if (wparam & 0xffff) == PALETTE_SAVE => {
+            let values: Vec<Option<String>> = PALETTE_EDITS.iter().map(|edit| {
+                let text = appearance_text(edit.load(Ordering::Relaxed));
+                if text.is_empty() { None } else { Some(text) }
+            }).collect();
+            if let Ok(mut config) = config_lock().lock() {
+                config.net_label_color_hex = values[0].clone();
+                config.net_accent_color_hex = values[1].clone();
+                config.cpu_ram_label_color_hex = values[2].clone();
+                config.cpu_ram_accent_color_hex = values[3].clone();
+                config.gpu_label_color_hex = values[4].clone();
+                config.gpu_accent_color_hex = values[5].clone();
+                config.disk_label_color_hex = values[6].clone();
+                config.disk_accent_color_hex = values[7].clone();
+                let _ = config_store::save(&config_path(), &config);
+            }
+            let overlay = OVERLAY_HANDLE.load(Ordering::Relaxed);
+            if !overlay.is_null() { PostMessageW(overlay, WM_APP_REFRESH, 0, 0); }
+            DestroyWindow(hwnd);
+            0
+        }
+        WM_CLOSE => { DestroyWindow(hwnd); 0 }
+        WM_DESTROY => {
+            PALETTE_HANDLE.store(null_mut(), Ordering::Relaxed);
+            for edit in &PALETTE_EDITS { edit.store(null_mut(), Ordering::Relaxed); }
+            0
+        }
+        _ => DefWindowProcW(hwnd, message, wparam, lparam),
+    }
+}
+
+unsafe fn open_palette_window(owner: Hwnd) {
+    let existing = PALETTE_HANDLE.load(Ordering::Relaxed);
+    if !existing.is_null() { ShowWindow(existing, SW_SHOW); return; }
+    let class_name: Vec<u16> = "Kil0bitRustPalette\0".encode_utf16().collect();
+    let title: Vec<u16> = "Section colors (blank inherits global color)\0".encode_utf16().collect();
+    let instance = GetModuleHandleW(null());
+    let class = WindowClass {
+        style: 0, window_proc: Some(palette_window_proc), class_extra: 0,
+        window_extra: 0, instance, icon: null_mut(), cursor: null_mut(),
+        background: null_mut(), menu_name: null(), class_name: class_name.as_ptr(),
+    };
+    if RegisterClassW(&class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS { return; }
+    let window = CreateWindowExW(WS_EX_TOOLWINDOW, class_name.as_ptr(), title.as_ptr(),
+        WS_OVERLAPPEDWINDOW, 520, 140, 480, 570, owner, null_mut(), instance, null_mut());
+    if window.is_null() { return; }
+    PALETTE_HANDLE.store(window, Ordering::Relaxed);
+    let config = config_lock().lock().map(|c| c.clone()).unwrap_or_default();
+    let values = [
+        ("Network label", config.net_label_color_hex),
+        ("Network value", config.net_accent_color_hex),
+        ("CPU/RAM label", config.cpu_ram_label_color_hex),
+        ("CPU/RAM value", config.cpu_ram_accent_color_hex),
+        ("GPU label", config.gpu_label_color_hex),
+        ("GPU value", config.gpu_accent_color_hex),
+        ("Disk label", config.disk_label_color_hex),
+        ("Disk value", config.disk_accent_color_hex),
+    ];
+    for (index, (label, value)) in values.iter().enumerate() {
+        let y = 20 + index as i32 * 54;
+        devices_child(window, "STATIC", label, 0, 20, y, 410, 20, 0);
+        let edit = devices_child(window, "EDIT", value.as_deref().unwrap_or(""), 0,
+            20, y + 20, 410, 27, WS_BORDER | WS_TABSTOP);
+        PALETTE_EDITS[index].store(edit, Ordering::Relaxed);
+    }
+    devices_child(window, "BUTTON", "Save section colors", PALETTE_SAVE,
+        20, 468, 210, 34, WS_TABSTOP);
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
 }
