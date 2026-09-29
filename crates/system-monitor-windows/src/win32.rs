@@ -34,6 +34,7 @@ const WM_NCHITTEST: u32 = 0x0084;
 const WM_NCLBUTTONDOWN: u32 = 0x00A1;
 const WM_NCRBUTTONUP: u32 = 0x00A5;
 const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_RBUTTONUP: u32 = 0x0205;
 const WM_MOVE: u32 = 0x0003;
@@ -45,8 +46,6 @@ const WM_DPICHANGED: u32 = 0x02E0;
 const WM_COMMAND: u32 = 0x0111;
 const WM_TIMER: u32 = 0x0113;
 const FADE_TIMER_ID: usize = 2;
-const DRAG_TIMER_ID: usize = 3;
-const VK_LBUTTON: i32 = 0x01;
 const WM_APP_REFRESH: u32 = 0x8001;
 const WM_APP_SHOW_SETTINGS: u32 = 0x8002;
 const WM_APP_DRAG_DIAGNOSTIC: u32 = 0x8003;
@@ -60,7 +59,6 @@ const ABM_NEW: u32 = 0x0000_0000;
 const ABM_REMOVE: u32 = 0x0000_0001;
 const ABM_WINDOWPOSCHANGED: u32 = 0x0000_0009;
 const HTCLIENT: isize = 1;
-const HTCAPTION: isize = 2;
 const MF_STRING: u32 = 0;
 const MF_CHECKED: u32 = 0x0008;
 const TPM_RIGHTBUTTON: u32 = 0x0002;
@@ -111,7 +109,7 @@ const SW_SHOW: i32 = 5;
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 const ERROR_ALREADY_EXISTS: u32 = 183;
 static POSITION_LOCKED: AtomicBool = AtomicBool::new(false);
-static DRAG_POLL: Mutex<Option<(Point, Point)>> = Mutex::new(None);
+static DRAG_ORIGIN: Mutex<Option<(Point, Point)>> = Mutex::new(None);
 static DRAG_NC_DOWN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static DRAG_CLIENT_DOWN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static DRAG_CLIENT_MOVE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -353,7 +351,8 @@ extern "system" {
     fn CreatePopupMenu() -> *mut c_void;
     fn AppendMenuW(menu: *mut c_void, flags: u32, item_id: usize, text: *const u16) -> i32;
     fn GetCursorPos(point: *mut Point) -> i32;
-    fn GetAsyncKeyState(key: i32) -> i16;
+    fn SetCapture(hwnd: Hwnd) -> Hwnd;
+    fn ReleaseCapture() -> i32;
     fn TrackPopupMenu(
         menu: *mut c_void,
         flags: u32,
@@ -478,8 +477,46 @@ unsafe extern "system" fn window_proc(
             3 => DRAG_WINDOW_MOVE.load(Ordering::Relaxed) as isize,
             _ => 0,
         },
-        WM_NCHITTEST if POSITION_LOCKED.load(Ordering::Relaxed) => HTCLIENT,
-        WM_NCHITTEST => HTCAPTION,
+        WM_NCHITTEST => HTCLIENT,
+        WM_LBUTTONDOWN if !POSITION_LOCKED.load(Ordering::Relaxed) => {
+            let mut cursor = Point { x: 0, y: 0 };
+            let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+            if GetCursorPos(&mut cursor) != 0 && GetWindowRect(hwnd, &mut rect) != 0 {
+                if let Ok(mut drag) = DRAG_ORIGIN.lock() {
+                    *drag = Some((cursor, Point { x: rect.left, y: rect.top }));
+                }
+                SetCapture(hwnd);
+            }
+            0
+        }
+        WM_MOUSEMOVE => {
+            if let Ok(drag) = DRAG_ORIGIN.lock() {
+                if let Some((cursor_start, window_start)) = *drag {
+                    let mut cursor = Point { x: 0, y: 0 };
+                    if GetCursorPos(&mut cursor) != 0 {
+                        SetWindowPos(
+                            hwnd,
+                            null_mut(),
+                            window_start.x + cursor.x - cursor_start.x,
+                            window_start.y + cursor.y - cursor_start.y,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
+                    }
+                }
+            }
+            0
+        }
+        WM_LBUTTONUP => {
+            if let Ok(mut drag) = DRAG_ORIGIN.lock() {
+                if drag.take().is_some() {
+                    ReleaseCapture();
+                    save_position();
+                }
+            }
+            0
+        }
         WM_CLOSE => {
             DestroyWindow(hwnd);
             0
@@ -504,13 +541,8 @@ unsafe extern "system" fn window_proc(
             if next == target { KillTimer(hwnd, FADE_TIMER_ID); }
             0
         }
-        WM_TIMER if wparam == DRAG_TIMER_ID => {
-            poll_drag(hwnd);
-            0
-        }
         WM_DESTROY => {
             KillTimer(hwnd, FADE_TIMER_ID);
-            KillTimer(hwnd, DRAG_TIMER_ID);
             if let Some(worker) = TELEMETRY_WORKER.get()
                 .and_then(|v| v.lock().ok())
                 .and_then(|mut v| v.take()) {
@@ -2327,7 +2359,6 @@ pub fn run(_pixels: &[u8], _width: i32, _height: i32) -> Result<(), WinError> {
         } else {
             ShowWindow(hwnd, 0);
         }
-        SetTimer(hwnd, DRAG_TIMER_ID, 16, null_mut());
         start_ai_worker(hwnd);
         start_deepseek_worker(hwnd);
         start_telemetry_worker(hwnd, telemetry);
@@ -2657,53 +2688,6 @@ unsafe fn update_fullscreen_visibility(hwnd: Hwnd) {
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
         if app_visible { SetTimer(hwnd, FADE_TIMER_ID, 16, null_mut()); }
-    }
-}
-
-unsafe fn poll_drag(hwnd: Hwnd) {
-    let left_button_down = GetAsyncKeyState(VK_LBUTTON) & i16::MIN != 0;
-    let mut drag = match DRAG_POLL.lock() {
-        Ok(drag) => drag,
-        Err(_) => return,
-    };
-    if POSITION_LOCKED.load(Ordering::Relaxed) || !left_button_down {
-        if drag.take().is_some() {
-            save_position();
-        }
-        return;
-    }
-    let mut cursor = Point { x: 0, y: 0 };
-    let mut rect = Rect {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    if GetCursorPos(&mut cursor) == 0 || GetWindowRect(hwnd, &mut rect) == 0 {
-        return;
-    }
-    if drag.is_none()
-        && cursor.x >= rect.left
-        && cursor.x < rect.right
-        && cursor.y >= rect.top
-        && cursor.y < rect.bottom
-    {
-        *drag = Some((cursor, Point { x: rect.left, y: rect.top }));
-    }
-    if let Some((origin_cursor, origin_window)) = *drag {
-        let x = origin_window.x + cursor.x - origin_cursor.x;
-        let y = origin_window.y + cursor.y - origin_cursor.y;
-        if x != rect.left || y != rect.top {
-            SetWindowPos(
-                hwnd,
-                null_mut(),
-                x,
-                y,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
     }
 }
 
