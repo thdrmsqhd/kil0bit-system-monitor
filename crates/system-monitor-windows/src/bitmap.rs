@@ -122,23 +122,22 @@ pub fn build_metrics_bitmap(
     }
     if config.deepseek_enabled {
         if let Some(balance) = deepseek {
+            if !balance.is_available {
+                fields.push(("DS NA".into(), [0, 165, 255]));
+            }
             for entry in &balance.balances {
+                let label = if balance.stale { "DS!" } else { "DS" };
                 fields.push((
-                    format!("DS {} {:.2}", entry.currency, entry.total),
+                    format!("{label} {} {:.2}", entry.currency, entry.total),
                     [30, 200, 80],
                 ));
             }
         }
     }
-    let mut glyphs = Vec::new();
+    let mut lines: Vec<Vec<(char, [u8; 3])>> = vec![Vec::new()];
     let default_label = parse_hex_bgr(&config.label_color_hex).unwrap_or(global_color);
     let no_override: Option<String> = None;
-    for (index, (field, color)) in fields.iter().enumerate() {
-        if index > 0 {
-            for _ in 0..(2 + config.column_spacing / 3) {
-                glyphs.push((' ', global_color));
-            }
-        }
+    for (field, color) in &fields {
         let (label, value) = field.split_once(' ').unwrap_or((field, ""));
         let (label_override, value_override) = match label {
             "UP" | "DOWN" | "U" | "D" =>
@@ -149,24 +148,34 @@ pub fn build_metrics_bitmap(
                 (&config.gpu_label_color_hex, &config.gpu_accent_color_hex),
             "DISK" | "ACT" | "K" | "A" =>
                 (&config.disk_label_color_hex, &config.disk_accent_color_hex),
-            "5H" | "W" | "M" | "DS" => (&no_override, &no_override),
+            "5H" | "W" | "M" | "DS" | "DS!" => (&no_override, &no_override),
             _ => (&config.disk_label_color_hex, &config.disk_accent_color_hex),
         };
         let label_color = label_override.as_deref().and_then(parse_hex_bgr).unwrap_or(default_label);
         let value_color = value_override.as_deref().and_then(parse_hex_bgr).unwrap_or(*color);
-        glyphs.extend(label.chars().map(|ch| (ch, label_color)));
-        glyphs.push((' ', label_color));
-        glyphs.extend(value.chars().map(|ch| (ch, value_color)));
+        let mut segment = Vec::new();
+        segment.extend(label.chars().map(|ch| (ch, label_color)));
+        segment.push((' ', label_color));
+        segment.extend(value.chars().map(|ch| (ch, value_color)));
+        let gap = (2 + config.column_spacing / 3) as usize;
+        let current = lines.last_mut().unwrap();
+        if !current.is_empty() && current.len() + gap + segment.len() > 80 {
+            lines.push(Vec::new());
+        }
+        let current = lines.last_mut().unwrap();
+        if !current.is_empty() {
+            current.extend(std::iter::repeat_n((' ', global_color), gap));
+        }
+        current.extend(segment);
     }
-    let char_count = glyphs.len() as i32;
+    let char_count = lines.iter().map(Vec::len).max().unwrap_or(0) as i32;
     let width = (32 + char_count * 12).max(52);
-    let height = HEIGHT;
+    let height = HEIGHT + (lines.len() as i32 - 1) * 26;
     let mut pixels = vec![0; width as usize * height as usize * BYTES_PER_PIXEL];
-    let alpha = if config.show_background || config.show_pods {
-        230
-    } else {
-        0
-    };
+    let alpha = if alternate_accent { 230 }
+        else if config.show_background { parse_hex_alpha(&config.background_color_hex).unwrap_or(230) }
+        else if config.show_pods { parse_hex_alpha(&config.pod_color_hex).unwrap_or(15) }
+        else { 0 };
     let capsule = if alternate_accent {
         [28u8, 78, 30]
     } else {
@@ -190,9 +199,10 @@ pub fn build_metrics_bitmap(
         }
     }
     let scale = 2;
-    let text_width = char_count * 12 - if char_count > 0 { 2 } else { 0 };
+    for (line_index, glyphs) in lines.iter().enumerate() {
+    let text_width = glyphs.len() as i32 * 12 - if glyphs.is_empty() { 0 } else { 2 };
     let origin_x = ((width - text_width) / 2).max(16);
-    let origin_y = (height - 7 * scale) / 2;
+    let origin_y = (HEIGHT - 7 * scale) / 2 + line_index as i32 * 26;
     for (index, (ch, color)) in glyphs.iter().enumerate() {
         let rows = glyph(*ch);
         for (row, bits) in rows.iter().enumerate() {
@@ -219,6 +229,7 @@ pub fn build_metrics_bitmap(
             }
         }
     }
+    }
     (pixels, width, height)
 }
 
@@ -232,6 +243,17 @@ fn parse_hex_bgr(input: &str) -> Option<[u8; 3]> {
     let green = u8::from_str_radix(&rgb[2..4], 16).ok()?;
     let blue = u8::from_str_radix(&rgb[4..6], 16).ok()?;
     Some([blue, green, red])
+}
+
+fn parse_hex_alpha(input: &str) -> Option<u8> {
+    let hex = input.trim_start_matches('#');
+    if hex.len() == 8 {
+        u8::from_str_radix(&hex[..2], 16).ok()
+    } else if hex.len() == 6 {
+        Some(255)
+    } else {
+        None
+    }
 }
 
 fn put_pixel_sized(pixels: &mut [u8], width: i32, x: i32, y: i32, bgr: [u8; 3], alpha: u8) {
@@ -275,6 +297,7 @@ fn glyph(ch: char) -> [u8; 7] {
         '8' => [14, 17, 17, 14, 17, 17, 14],
         '9' => [14, 17, 17, 15, 1, 1, 14],
         '%' => [17, 2, 4, 8, 17, 0, 0],
+        '!' => [4, 4, 4, 4, 4, 0, 4],
         '.' => [0, 0, 0, 0, 0, 12, 12],
         ':' => [0, 12, 12, 0, 12, 12, 0],
         '/' => [1, 2, 2, 4, 8, 8, 16],

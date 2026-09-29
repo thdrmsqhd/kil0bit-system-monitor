@@ -44,6 +44,8 @@ const WM_DISPLAYCHANGE: u32 = 0x007E;
 const WM_SETTINGCHANGE: u32 = 0x001A;
 const WM_DPICHANGED: u32 = 0x02E0;
 const WM_COMMAND: u32 = 0x0111;
+const WM_TIMER: u32 = 0x0113;
+const FADE_TIMER_ID: usize = 2;
 const WM_APP_REFRESH: u32 = 0x8001;
 const WM_APP_SHOW_SETTINGS: u32 = 0x8002;
 const GWLP_HWNDPARENT: i32 = -8;
@@ -91,6 +93,7 @@ const SETTINGS_MAINTENANCE: usize = 1025;
 const MAINTENANCE_RESET_APPEARANCE: usize = 1301;
 const MAINTENANCE_RESET_ALL: usize = 1302;
 const MAINTENANCE_IMPORT_LEGACY: usize = 1303;
+const MAINTENANCE_RESTORE_BACKUP: usize = 1304;
 const AI_INTERVALS: [u32; 4] = [60, 300, 900, 3600];
 const BM_GETCHECK: u32 = 0x00F0;
 const BM_SETCHECK: u32 = 0x00F1;
@@ -113,6 +116,7 @@ static FREE_X: AtomicI32 = AtomicI32::new(100);
 static FREE_Y: AtomicI32 = AtomicI32::new(100);
 static ALTERNATE_ACCENT: AtomicBool = AtomicBool::new(false);
 static FULLSCREEN_HIDDEN: AtomicBool = AtomicBool::new(false);
+static OVERLAY_ALPHA: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(255);
 static FULLSCREEN_CANDIDATE: Mutex<(bool, u8)> = Mutex::new((false, 0));
 static DPI_SCALE_PERCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
 static CONFIG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
@@ -383,6 +387,8 @@ extern "system" {
     fn GetModuleHandleW(module_name: *const u16) -> Hinstance;
     fn SetProcessDpiAwarenessContext(context: *mut c_void) -> i32;
     fn CreateMutexW(attributes: *mut c_void, initial_owner: i32, name: *const u16) -> *mut c_void;
+    fn SetTimer(hwnd: Hwnd, timer_id: usize, interval_ms: u32, callback: *mut c_void) -> usize;
+    fn KillTimer(hwnd: Hwnd, timer_id: usize) -> i32;
 }
 
 #[link(name = "shell32")]
@@ -491,7 +497,19 @@ unsafe extern "system" fn window_proc(
             open_settings_window(hwnd);
             0
         }
+        WM_TIMER if wparam == FADE_TIMER_ID => {
+            let current = OVERLAY_ALPHA.load(Ordering::Relaxed);
+            let target = if FULLSCREEN_HIDDEN.load(Ordering::Relaxed) { 0 } else { 255 };
+            let next = if current < target { (current + 32).min(target) }
+                else { current.saturating_sub(32).max(target) };
+            OVERLAY_ALPHA.store(next, Ordering::Relaxed);
+            if next == 0 { ShowWindow(hwnd, 0); }
+            else { refresh_overlay(hwnd); }
+            if next == target { KillTimer(hwnd, FADE_TIMER_ID); }
+            0
+        }
         WM_DESTROY => {
+            KillTimer(hwnd, FADE_TIMER_ID);
             if let Some(worker) = TELEMETRY_WORKER.get()
                 .and_then(|v| v.lock().ok())
                 .and_then(|mut v| v.take()) {
@@ -618,10 +636,13 @@ unsafe extern "system" fn settings_window_proc(
             let result =
                 crate::secret_store::SecretStore::opencode().and_then(|store| store.remove());
             if result.is_ok() {
+                let codex_active = config_lock().lock()
+                    .map(|c| c.codex_enabled).unwrap_or(false);
                 if let Ok(mut config) = config_lock().lock() {
                     config.opencode_enabled = false;
                     let _ = config_store::save(&config_path(), &config);
                 }
+                if !codex_active {
                 if let Some(worker) = AI_WORKER
                     .get()
                     .and_then(|v| v.lock().ok())
@@ -633,6 +654,7 @@ unsafe extern "system" fn settings_window_proc(
                     if let Ok(mut value) = snapshot.lock() {
                         *value = None;
                     }
+                }
                 }
                 set_ai_key_status("OpenCode key removed");
             } else {
@@ -715,7 +737,7 @@ unsafe extern "system" fn settings_window_proc(
     }
 }
 
-unsafe fn open_settings_window(owner: Hwnd) {
+unsafe fn open_settings_window(_owner: Hwnd) {
     let current = SETTINGS_HANDLE.load(Ordering::Relaxed);
     if !current.is_null() {
         ShowWindow(current, SW_SHOW);
@@ -748,7 +770,7 @@ unsafe fn open_settings_window(owner: Hwnd) {
         100,
         560,
         760,
-        owner,
+        null_mut(),
         null_mut(),
         instance,
         null_mut(),
@@ -1127,8 +1149,9 @@ unsafe extern "system" fn maintenance_window_proc(
             let legacy = std::env::var_os("APPDATA")
                 .map(std::path::PathBuf::from)
                 .map(|root| root.join("kil0bit-system-monitor").join("config.json"));
-            let imported = legacy.as_deref().and_then(|path| config_store::import_legacy(path).ok());
-            let result = if let Some(config) = imported {
+            let imported = legacy.as_deref()
+                .and_then(|path| config_store::import_legacy_with_report(path).ok());
+            let result = if let Some((config, unsupported)) = imported {
                 if let Ok(mut current) = config_lock().lock() {
                     *current = config;
                     let _ = config_store::save(&config_path(), &current);
@@ -1137,11 +1160,26 @@ unsafe extern "system" fn maintenance_window_proc(
                 start_ai_worker(OVERLAY_HANDLE.load(Ordering::Relaxed));
                 start_deepseek_worker(OVERLAY_HANDLE.load(Ordering::Relaxed));
                 maintenance_refresh();
-                "Legacy settings imported; the original file was not modified."
-            } else { "Could not read a valid legacy settings file." };
+                format!("Legacy settings imported without changing the original file. Unsupported keys: {}",
+                    if unsupported.is_empty() { "none".into() } else { unsupported.join(", ") })
+            } else { "Could not read a valid legacy settings file.".into() };
             let wide: Vec<u16> = result.encode_utf16().chain(Some(0)).collect();
             let title: Vec<u16> = "Import legacy config\0".encode_utf16().collect();
             MessageBoxW(hwnd, wide.as_ptr(), title.as_ptr(), 0);
+            0
+        }
+        WM_COMMAND if (wparam & 0xffff) == MAINTENANCE_RESTORE_BACKUP => {
+            if confirm_maintenance(hwnd, "Restore the previous Rust settings backup?") {
+                let result = config_store::restore_backup(&config_path());
+                if result.is_ok() {
+                    load_config();
+                    maintenance_refresh();
+                } else {
+                    let wide: Vec<u16> = "No valid settings backup was found.\0".encode_utf16().collect();
+                    let title: Vec<u16> = "Restore backup\0".encode_utf16().collect();
+                    MessageBoxW(hwnd, wide.as_ptr(), title.as_ptr(), 0);
+                }
+            }
             0
         }
         WM_CLOSE => { DestroyWindow(hwnd); 0 }
@@ -1179,7 +1217,7 @@ unsafe fn open_maintenance_window(owner: Hwnd) {
     };
     if RegisterClassW(&class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS { return; }
     let window = CreateWindowExW(WS_EX_TOOLWINDOW, class_name.as_ptr(), title.as_ptr(),
-        WS_OVERLAPPEDWINDOW, 430, 230, 460, 300, owner, null_mut(), instance, null_mut());
+        WS_OVERLAPPEDWINDOW, 430, 230, 460, 350, owner, null_mut(), instance, null_mut());
     if window.is_null() { return; }
     MAINTENANCE_HANDLE.store(window, Ordering::Relaxed);
     devices_child(window, "BUTTON", "Reset appearance", MAINTENANCE_RESET_APPEARANCE,
@@ -1188,6 +1226,8 @@ unsafe fn open_maintenance_window(owner: Hwnd) {
         25, 80, 385, 40, WS_TABSTOP);
     devices_child(window, "BUTTON", "Import legacy settings (read-only)", MAINTENANCE_IMPORT_LEGACY,
         25, 135, 385, 40, WS_TABSTOP);
+    devices_child(window, "BUTTON", "Restore previous Rust settings", MAINTENANCE_RESTORE_BACKUP,
+        25, 190, 385, 40, WS_TABSTOP);
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
 }
@@ -1563,12 +1603,17 @@ fn start_deepseek_worker(hwnd: Hwnd) {
     let handle = hwnd as usize;
     let worker = super::ai_usage::DeepSeekWorker::start(
         config.ai_poll_interval_seconds, store, move |event| {
-            if let Ok(snapshot) = event {
-                if let Some(state) = DEEPSEEK_SNAPSHOT.get() {
-                    if let Ok(mut current) = state.lock() { *current = Some(snapshot); }
+            if let Some(state) = DEEPSEEK_SNAPSHOT.get() {
+                if let Ok(mut current) = state.lock() {
+                    match event {
+                        Ok(snapshot) => *current = Some(snapshot),
+                        Err(_) => {
+                            if let Some(snapshot) = current.as_mut() { snapshot.stale = true; }
+                        }
+                    }
                 }
-                unsafe { PostMessageW(handle as Hwnd, WM_APP_REFRESH, 0, 0); }
             }
+            unsafe { PostMessageW(handle as Hwnd, WM_APP_REFRESH, 0, 0); }
         });
     if let Some(slot) = DEEPSEEK_WORKER.get() {
         if let Ok(mut slot) = slot.lock() { *slot = Some(worker); }
@@ -1605,9 +1650,12 @@ unsafe fn save_opencode_key_from_settings() {
         Ok(()) => {
             if let Ok(mut config) = config_lock().lock() {
                 config.opencode_enabled = true;
+                config.codex_enabled = false;
                 let _ = config_store::save(&config_path(), &config);
             }
             set_ai_key_status("OpenCode key saved for this Windows user");
+            if let Some(worker) = AI_WORKER.get()
+                .and_then(|v| v.lock().ok()).and_then(|mut v| v.take()) { drop(worker); }
             start_ai_worker(OVERLAY_HANDLE.load(Ordering::Relaxed));
         }
         Err(_) => set_ai_key_status("Could not save OpenCode key"),
@@ -1684,6 +1732,8 @@ fn save_ai_options_from_settings() {
         .get(selected.max(0) as usize)
         .copied()
         .unwrap_or(300);
+    let previous_interval = config_lock().lock()
+        .map(|c| c.ai_poll_interval_seconds).unwrap_or(300);
     let mut provider_changed = false;
     if let Ok(mut config) = config_lock().lock() {
         if checked.len() == 5 {
@@ -1725,6 +1775,9 @@ fn save_ai_options_from_settings() {
                 worker.set_interval(interval);
             }
         }
+    }
+    if previous_interval != interval {
+        restart_deepseek_worker(OVERLAY_HANDLE.load(Ordering::Relaxed));
     }
     let overlay = OVERLAY_HANDLE.load(Ordering::Relaxed);
     if !overlay.is_null() {
@@ -2405,7 +2458,8 @@ unsafe fn refresh_overlay(hwnd: Hwnd) {
         .lock()
         .map(|config| config.show_overlay)
         .unwrap_or(true);
-    if !visible || FULLSCREEN_HIDDEN.load(Ordering::Relaxed) {
+    if !visible || (FULLSCREEN_HIDDEN.load(Ordering::Relaxed)
+        && OVERLAY_ALPHA.load(Ordering::Relaxed) == 0) {
         ShowWindow(hwnd, 0);
         return;
     }
@@ -2471,14 +2525,10 @@ unsafe fn update_fullscreen_visibility(hwnd: Hwnd) {
     }
     let previous = FULLSCREEN_HIDDEN.swap(hidden, Ordering::Relaxed);
     if previous != hidden {
-        if hidden {
-            ShowWindow(hwnd, 0);
-        } else if app_visible {
+        if !hidden && app_visible {
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
-        if !hidden && app_visible {
-            refresh_overlay(hwnd);
-        }
+        if app_visible { SetTimer(hwnd, FADE_TIMER_ID, 16, null_mut()); }
     }
 }
 
@@ -2549,7 +2599,7 @@ unsafe fn present_bitmap(
     let blend = BlendFunction {
         operation: AC_SRC_OVER,
         flags: 0,
-        source_constant_alpha: 255,
+        source_constant_alpha: OVERLAY_ALPHA.load(Ordering::Relaxed) as u8,
         alpha_format: AC_SRC_ALPHA,
     };
     let success = UpdateLayeredWindow(

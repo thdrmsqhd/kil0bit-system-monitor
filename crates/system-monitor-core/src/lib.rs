@@ -208,22 +208,60 @@ pub mod config_store {
         file.write_all(&bytes)?;
         file.sync_all()?;
         drop(file);
+        if let Ok(previous) = fs::read(path) {
+            let suffix = if serde_json::from_slice::<AppConfig>(&previous).is_ok() {
+                "bak"
+            } else {
+                "corrupt.bak"
+            };
+            fs::copy(path, backup_path(path, suffix))?;
+        }
         replace(&temp, path)?;
         Ok(())
     }
 
-    /// Read a legacy config once, preserving its bytes and tolerating unknown fields.
-    pub fn import_legacy(path: &Path) -> io::Result<AppConfig> {
-        let bytes = fs::read(path)?;
+    /// Restore the most recent valid Rust-owned config; the original app is never accessed.
+    pub fn restore_backup(path: &Path) -> io::Result<AppConfig> {
+        let backup = backup_path(path, "bak");
+        let bytes = fs::read(&backup)?;
         let mut config: AppConfig = serde_json::from_slice(&bytes)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         config.normalize();
+        save(path, &config)?;
         Ok(config)
+    }
+
+    /// Read a legacy config once, preserving its bytes and tolerating unknown fields.
+    pub fn import_legacy(path: &Path) -> io::Result<AppConfig> {
+        import_legacy_with_report(path).map(|(config, _)| config)
+    }
+
+    /// Returns unsupported source keys so the user can review what was not imported.
+    pub fn import_legacy_with_report(path: &Path) -> io::Result<(AppConfig, Vec<String>)> {
+        let bytes = fs::read(path)?;
+        let source: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let known = serde_json::to_value(AppConfig::default())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut unsupported: Vec<String> = source.as_object().into_iter().flat_map(|map| map.keys())
+            .filter(|key| !known.as_object().is_some_and(|map| map.contains_key(*key)))
+            .cloned().collect();
+        unsupported.sort();
+        let mut config: AppConfig = serde_json::from_slice(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        config.normalize();
+        Ok((config, unsupported))
     }
 
     fn temp_path(path: &Path) -> PathBuf {
         let mut name = path.as_os_str().to_owned();
         name.push(".tmp");
+        PathBuf::from(name)
+    }
+
+    fn backup_path(path: &Path, suffix: &str) -> PathBuf {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".{suffix}"));
         PathBuf::from(name)
     }
 

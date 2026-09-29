@@ -560,7 +560,11 @@ mod windows_smoke {
             {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("Snap to Taskbar did not restore centered taskbar position".into());
+                return Err(format!(
+                    "Snap to Taskbar did not restore centered taskbar position: actual y={}, expected y={}, height={}, taskbar=[{},{}]",
+                    snapped_rect.top, snap_y, snapped_rect.bottom - snapped_rect.top,
+                    taskbar_rect.top, taskbar_rect.bottom
+                ));
             }
             if let Err(error) = click_context_item(hwnd, 2) {
                 let _ = child.kill();

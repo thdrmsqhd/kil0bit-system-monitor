@@ -24,6 +24,7 @@ pub struct CurrencyBalance {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeepSeekBalanceSnapshot {
     pub is_available: bool,
+    pub stale: bool,
     pub balances: Vec<CurrencyBalance>,
 }
 
@@ -407,6 +408,7 @@ pub fn parse_deepseek_balance(value: &Value) -> Result<DeepSeekBalanceSnapshot, 
     }
     Ok(DeepSeekBalanceSnapshot {
         is_available,
+        stale: false,
         balances,
     })
 }
