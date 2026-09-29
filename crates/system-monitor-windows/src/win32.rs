@@ -2675,6 +2675,16 @@ unsafe fn present_bitmap(
         return Err(last_error("CreateDIBSection"));
     }
     std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u8>(), pixels.len());
+    // Zero-alpha pixels of a layered window pass mouse input through to the
+    // desktop. A minimal premultiplied alpha keeps the invisible gaps usable
+    // as a drag surface while preserving the overlay's transparent appearance.
+    let surface = std::slice::from_raw_parts_mut(bits.cast::<u8>(), pixels.len());
+    for pixel in surface.chunks_exact_mut(4) {
+        if pixel[3] == 0 {
+            pixel[..3].fill(0);
+            pixel[3] = 1;
+        }
+    }
     let old_bitmap = SelectObject(memory_dc, bitmap);
     let mut window_rect = Rect {
         left: 100,
