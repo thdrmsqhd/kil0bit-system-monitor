@@ -17,6 +17,7 @@ mod windows_smoke {
     const HTCLIENT: isize = 1;
     const HTCAPTION: isize = 2;
     const INPUT_MOUSE: u32 = 0;
+    const MOUSEEVENTF_MOVE: u32 = 0x0001;
     const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
     const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
     const SM_CYMENU: i32 = 15;
@@ -31,6 +32,7 @@ mod windows_smoke {
         fn PostMessageW(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> i32;
         fn SendMessageW(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize;
         fn SetCursorPos(x: i32, y: i32) -> i32;
+        fn GetCursorPos(point: *mut Point) -> i32;
         fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
         fn GetDC(hwnd: Hwnd) -> Hwnd;
         fn ReleaseDC(hwnd: Hwnd, dc: Hwnd) -> i32;
@@ -83,12 +85,16 @@ mod windows_smoke {
     }
 
     fn send_mouse(flags: u32) -> Result<(), String> {
+        send_mouse_event(flags, 0, 0)
+    }
+
+    fn send_mouse_event(flags: u32, dx: i32, dy: i32) -> Result<(), String> {
         let event = Input {
             kind: INPUT_MOUSE,
             data: InputData {
                 mouse: MouseInput {
-                    dx: 0,
-                    dy: 0,
+                    dx,
+                    dy,
                     mouse_data: 0,
                     flags,
                     time: 0,
@@ -273,10 +279,17 @@ mod windows_smoke {
         }
         send_mouse(MOUSEEVENTF_LEFTDOWN)?;
         thread::sleep(Duration::from_millis(100));
-        if unsafe { SetCursorPos(start_x + dx, start_y + dy) } == 0 {
-            return Err("could not move pointer during overlay drag".into());
+        for _ in 0..3 {
+            send_mouse_event(MOUSEEVENTF_MOVE, dx / 3, dy / 3)?;
+            thread::sleep(Duration::from_millis(70));
         }
-        thread::sleep(Duration::from_millis(100));
+        let mut cursor = Point { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut cursor) } == 0
+            || (cursor.x - start_x).abs() < 10
+            || (cursor.y - start_y).abs() < 8
+        {
+            return Err("SendInput did not move the cursor during overlay drag".into());
+        }
         send_mouse(MOUSEEVENTF_LEFTUP)?;
         thread::sleep(Duration::from_millis(100));
         let mut after = Rect {
