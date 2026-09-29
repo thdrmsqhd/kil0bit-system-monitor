@@ -2291,7 +2291,7 @@ pub fn run(_pixels: &[u8], _width: i32, _height: i32) -> Result<(), WinError> {
             WS_EX_LAYERED | WS_EX_TOOLWINDOW | if always_on_top { WS_EX_TOPMOST } else { 0 },
             class_name.as_ptr(),
             window_name.as_ptr(),
-            WS_POPUP,
+            WS_POPUP | WS_CAPTION as u32,
             FREE_X.load(Ordering::Relaxed),
             FREE_Y.load(Ordering::Relaxed),
             initial_width,
