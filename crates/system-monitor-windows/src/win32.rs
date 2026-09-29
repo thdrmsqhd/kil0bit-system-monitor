@@ -32,10 +32,12 @@ const WM_CLOSE: u32 = 0x0010;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_NCHITTEST: u32 = 0x0084;
 const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+const WM_NCLBUTTONUP: u32 = 0x00A2;
 const WM_NCRBUTTONUP: u32 = 0x00A5;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_NCMOUSEMOVE: u32 = 0x00A0;
 const WM_RBUTTONUP: u32 = 0x0205;
 const WM_MOVE: u32 = 0x0003;
 const WM_WINDOWPOSCHANGED: u32 = 0x0047;
@@ -59,6 +61,7 @@ const ABM_NEW: u32 = 0x0000_0000;
 const ABM_REMOVE: u32 = 0x0000_0001;
 const ABM_WINDOWPOSCHANGED: u32 = 0x0000_0009;
 const HTCLIENT: isize = 1;
+const HTCAPTION: isize = 2;
 const MF_STRING: u32 = 0;
 const MF_CHECKED: u32 = 0x0008;
 const TPM_RIGHTBUTTON: u32 = 0x0002;
@@ -477,8 +480,9 @@ unsafe extern "system" fn window_proc(
             3 => DRAG_WINDOW_MOVE.load(Ordering::Relaxed) as isize,
             _ => 0,
         },
-        WM_NCHITTEST => HTCLIENT,
-        WM_LBUTTONDOWN if !POSITION_LOCKED.load(Ordering::Relaxed) => {
+        WM_NCHITTEST if POSITION_LOCKED.load(Ordering::Relaxed) => HTCLIENT,
+        WM_NCHITTEST => HTCAPTION,
+        WM_NCLBUTTONDOWN | WM_LBUTTONDOWN if !POSITION_LOCKED.load(Ordering::Relaxed) => {
             let mut cursor = Point { x: 0, y: 0 };
             let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
             if GetCursorPos(&mut cursor) != 0 && GetWindowRect(hwnd, &mut rect) != 0 {
@@ -489,7 +493,7 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_MOUSEMOVE => {
+        WM_MOUSEMOVE | WM_NCMOUSEMOVE => {
             if let Ok(drag) = DRAG_ORIGIN.lock() {
                 if let Some((cursor_start, window_start)) = *drag {
                     let mut cursor = Point { x: 0, y: 0 };
@@ -508,7 +512,7 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_LBUTTONUP => {
+        WM_NCLBUTTONUP | WM_LBUTTONUP => {
             if let Ok(mut drag) = DRAG_ORIGIN.lock() {
                 if drag.take().is_some() {
                     ReleaseCapture();
