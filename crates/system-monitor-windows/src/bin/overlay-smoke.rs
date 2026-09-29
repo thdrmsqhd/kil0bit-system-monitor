@@ -39,6 +39,8 @@ mod windows_smoke {
         fn ReleaseDC(hwnd: Hwnd, dc: Hwnd) -> i32;
         fn GetSystemMetrics(index: i32) -> i32;
         fn WindowFromPoint(point: Point) -> Hwnd;
+        fn GetForegroundWindow() -> Hwnd;
+        fn SetForegroundWindow(hwnd: Hwnd) -> i32;
     }
 
     #[link(name = "gdi32")]
@@ -278,6 +280,12 @@ mod windows_smoke {
         if unsafe { SetCursorPos(start_x, start_y) } == 0 {
             return Err("could not move pointer onto overlay".into());
         }
+        // A popup menu or Settings may still own foreground activation after the
+        // preceding menu clicks. Keep the actual SendInput drag as the acceptance check.
+        let activated = unsafe { SetForegroundWindow(hwnd) } != 0;
+        thread::sleep(Duration::from_millis(80));
+        let foreground = unsafe { GetForegroundWindow() };
+        let target_at_down = unsafe { WindowFromPoint(Point { x: start_x, y: start_y }) };
         send_mouse(MOUSEEVENTF_LEFTDOWN)?;
         thread::sleep(Duration::from_millis(100));
         for _ in 0..3 {
@@ -306,9 +314,10 @@ mod windows_smoke {
             let counts: Vec<_> = (0..4).map(|index|
                 unsafe { SendMessageW(hwnd, WM_APP_DRAG_DIAGNOSTIC, index, 0) }).collect();
             return Err(format!(
-                "unlocked overlay did not move in response to drag: ({}, {}) -> ({}, {}); nc_down={}, client_down={}, client_move={}, window_move={}",
+                "unlocked overlay did not move in response to drag: ({}, {}) -> ({}, {}); nc_down={}, client_down={}, client_move={}, window_move={}; activated={activated}, foreground_overlay={}, down_target_overlay={}",
                 before.left, before.top, after.left, after.top,
                 counts[0], counts[1], counts[2], counts[3],
+                foreground == hwnd, target_at_down == hwnd,
             ));
         }
         Ok((before, after))
