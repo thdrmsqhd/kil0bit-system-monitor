@@ -263,7 +263,8 @@ mod windows_smoke {
         let executable = std::env::args_os()
             .nth(1)
             .ok_or("usage: overlay-smoke <path-to-system-monitor-windows.exe>")?;
-        let profile = std::env::temp_dir().join(format!("kil0bit-rust-smoke-{}", std::process::id()));
+        let profile =
+            std::env::temp_dir().join(format!("kil0bit-rust-smoke-{}", std::process::id()));
         let settings_dir = profile.join("Kil0bitSystemMonitorRust");
         std::fs::create_dir_all(&settings_dir)
             .map_err(|error| format!("create isolated smoke profile: {error}"))?;
