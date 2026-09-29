@@ -41,6 +41,7 @@ mod windows_smoke {
         fn WindowFromPoint(point: Point) -> Hwnd;
         fn GetForegroundWindow() -> Hwnd;
         fn SetForegroundWindow(hwnd: Hwnd) -> i32;
+        fn GetGUIThreadInfo(thread_id: u32, info: *mut GuiThreadInfo) -> i32;
     }
 
     #[link(name = "gdi32")]
@@ -62,6 +63,19 @@ mod windows_smoke {
     struct Point {
         x: i32,
         y: i32,
+    }
+
+    #[repr(C)]
+    struct GuiThreadInfo {
+        size: u32,
+        flags: u32,
+        active: Hwnd,
+        focus: Hwnd,
+        capture: Hwnd,
+        menu_owner: Hwnd,
+        move_size: Hwnd,
+        caret: Hwnd,
+        caret_rect: Rect,
     }
 
     #[repr(C)]
@@ -313,11 +327,20 @@ mod windows_smoke {
         if before.left == after.left && before.top == after.top {
             let counts: Vec<_> = (0..4).map(|index|
                 unsafe { SendMessageW(hwnd, WM_APP_DRAG_DIAGNOSTIC, index, 0) }).collect();
+            let mut gui = GuiThreadInfo {
+                size: std::mem::size_of::<GuiThreadInfo>() as u32,
+                flags: 0, active: std::ptr::null_mut(), focus: std::ptr::null_mut(),
+                capture: std::ptr::null_mut(), menu_owner: std::ptr::null_mut(),
+                move_size: std::ptr::null_mut(), caret: std::ptr::null_mut(),
+                caret_rect: Rect { left: 0, top: 0, right: 0, bottom: 0 },
+            };
+            let gui_available = unsafe { GetGUIThreadInfo(0, &mut gui) } != 0;
             return Err(format!(
-                "unlocked overlay did not move in response to drag: ({}, {}) -> ({}, {}); nc_down={}, client_down={}, client_move={}, window_move={}; activated={activated}, foreground_overlay={}, down_target_overlay={}",
+                "unlocked overlay did not move in response to drag: ({}, {}) -> ({}, {}); nc_down={}, client_down={}, client_move={}, window_move={}; activated={activated}, foreground_overlay={}, down_target_overlay={}, gui_info={gui_available}, capture_present={}, menu_owner_present={}, gui_flags={}",
                 before.left, before.top, after.left, after.top,
                 counts[0], counts[1], counts[2], counts[3],
                 foreground == hwnd, target_at_down == hwnd,
+                !gui.capture.is_null(), !gui.menu_owner.is_null(), gui.flags,
             ));
         }
         Ok((before, after))
