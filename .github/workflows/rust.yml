@@ -42,6 +42,7 @@ jobs:
             rust-port.zip
             rust-port.zip.sha256.txt
       - name: Win32 layered-window smoke test
+        timeout-minutes: 3
         shell: pwsh
         run: >-
           .\target\x86_64-pc-windows-msvc\release\overlay-smoke.exe
