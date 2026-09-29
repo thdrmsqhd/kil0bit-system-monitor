@@ -35,6 +35,7 @@ mod windows_smoke {
         fn GetDC(hwnd: Hwnd) -> Hwnd;
         fn ReleaseDC(hwnd: Hwnd, dc: Hwnd) -> i32;
         fn GetSystemMetrics(index: i32) -> i32;
+        fn WindowFromPoint(point: Point) -> Hwnd;
     }
 
     #[link(name = "gdi32")]
@@ -49,6 +50,13 @@ mod windows_smoke {
         top: i32,
         right: i32,
         bottom: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Point {
+        x: i32,
+        y: i32,
     }
 
     #[repr(C)]
@@ -234,8 +242,33 @@ mod windows_smoke {
         if unsafe { GetWindowRect(hwnd, &mut before) } == 0 {
             return Err("could not read overlay bounds before drag".into());
         }
-        let start_x = (before.left + before.right) / 2;
-        let start_y = (before.top + before.bottom) / 2;
+        let center_x = (before.left + before.right) / 2;
+        let center_y = (before.top + before.bottom) / 2;
+        let mut target = None;
+        for radius in (0..(before.right - before.left).max(before.bottom - before.top)).step_by(3)
+        {
+            for y in (center_y - radius..=center_y + radius).step_by(3) {
+                if y < before.top || y >= before.bottom {
+                    continue;
+                }
+                for x in [center_x - radius, center_x + radius] {
+                    if x >= before.left
+                        && x < before.right
+                        && unsafe { WindowFromPoint(Point { x, y }) } == hwnd
+                    {
+                        target = Some((x, y));
+                        break;
+                    }
+                }
+                if target.is_some() {
+                    break;
+                }
+            }
+            if target.is_some() {
+                break;
+            }
+        }
+        let (start_x, start_y) = target.ok_or("no opaque overlay pixel accepts mouse input")?;
         if unsafe { SetCursorPos(start_x, start_y) } == 0 {
             return Err("could not move pointer onto overlay".into());
         }
