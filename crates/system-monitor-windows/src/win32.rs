@@ -2679,10 +2679,10 @@ unsafe fn present_bitmap(
     // desktop. A minimal premultiplied alpha keeps the invisible gaps usable
     // as a drag surface while preserving the overlay's transparent appearance.
     let surface = std::slice::from_raw_parts_mut(bits.cast::<u8>(), pixels.len());
-    for pixel in surface.chunks_exact_mut(4) {
-        if pixel[3] == 0 {
-            pixel[..3].fill(0);
-            pixel[3] = 1;
+    for alpha_index in (3..surface.len()).step_by(4) {
+        if surface[alpha_index] == 0 {
+            surface[alpha_index - 3..alpha_index].fill(0);
+            surface[alpha_index] = 1;
         }
     }
     let old_bitmap = SelectObject(memory_dc, bitmap);
