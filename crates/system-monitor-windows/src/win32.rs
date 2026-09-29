@@ -32,6 +32,7 @@ const WM_CLOSE: u32 = 0x0010;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_NCHITTEST: u32 = 0x0084;
 const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+const WM_NCRBUTTONUP: u32 = 0x00A5;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_RBUTTONUP: u32 = 0x0205;
@@ -592,7 +593,7 @@ unsafe extern "system" fn window_proc(
             DestroyWindow(hwnd);
             0
         }
-        WM_RBUTTONUP => {
+        WM_RBUTTONUP | WM_NCRBUTTONUP => {
             show_context_menu(hwnd);
             0
         }
@@ -2601,6 +2602,7 @@ unsafe fn update_fullscreen_visibility(hwnd: Hwnd) {
                 flags: 0,
             };
             hidden = !monitor.is_null()
+                && monitor == MonitorFromWindow(hwnd, 2)
                 && GetMonitorInfoW(monitor, &mut info) != 0
                 && GetWindowRect(foreground, &mut rect) != 0
                 && GetWindowLongPtrW(foreground, -16) & WS_CAPTION == 0
