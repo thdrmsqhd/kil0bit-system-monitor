@@ -217,7 +217,9 @@ impl Default for TelemetryCollector {
 
 pub(crate) fn is_eligible_adapter(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    !(lower.contains("loopback") || lower.contains("virtual") || lower.contains("pseudo"))
+    !lower.contains('*')
+        && !["loopback", "tunnel", "pseudo", "filter", "packet scheduler", "wfp", "qos", "native mac layer"]
+            .iter().any(|excluded| lower.contains(excluded))
 }
 
 #[cfg(test)]
@@ -227,7 +229,7 @@ mod tests {
     #[test]
     fn excludes_loopback_and_pseudo_interfaces() {
         assert!(!is_eligible_adapter("Loopback Pseudo-Interface 1"));
-        assert!(!is_eligible_adapter("Virtual Ethernet"));
+        assert!(is_eligible_adapter("Virtual Ethernet"));
         assert!(is_eligible_adapter("Wi-Fi"));
         assert!(is_eligible_adapter("Ethernet 2"));
     }
