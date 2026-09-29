@@ -68,6 +68,7 @@ const MENU_SETTINGS: u32 = 4;
 const MENU_TASK_MANAGER: u32 = 5;
 const MENU_TOGGLE_TOPMOST: u32 = 6;
 const MENU_ABOUT: u32 = 7;
+const MENU_TOGGLE_FULLSCREEN: u32 = 8;
 const SETTINGS_TOGGLE_ACCENT: usize = 1001;
 const SETTINGS_SAVE_OPENCODE_KEY: usize = 1002;
 const SETTINGS_REMOVE_OPENCODE_KEY: usize = 1003;
@@ -81,6 +82,8 @@ const SETTINGS_PORT_FIRST: usize = 1011;
 const SETTINGS_PORT_LAST: usize = 1022;
 const SETTINGS_DEVICES: usize = 1023;
 const DEVICES_SAVE: usize = 1101;
+const DEVICES_APPEARANCE: usize = 1102;
+const APPEARANCE_SAVE: usize = 1401;
 const SETTINGS_DEEPSEEK: usize = 1024;
 const DEEPSEEK_SAVE: usize = 1201;
 const DEEPSEEK_REMOVE: usize = 1202;
@@ -130,6 +133,12 @@ static DISK_LIST: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static GPU_INDEX_EDIT: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
+static UPDATE_COMBO: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static DEVICE_CHECKS: [std::sync::atomic::AtomicPtr<c_void>; 2] = [
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+];
 static NETWORK_CHOICES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static DISK_CHOICES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static DEEPSEEK_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
@@ -138,6 +147,23 @@ static DEEPSEEK_KEY_EDIT: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static MAINTENANCE_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
+static APPEARANCE_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static APPEARANCE_EDITS: [std::sync::atomic::AtomicPtr<c_void>; 8] = [
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+];
+static APPEARANCE_CHECKS: [std::sync::atomic::AtomicPtr<c_void>; 3] = [
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+    std::sync::atomic::AtomicPtr::new(null_mut()),
+];
 static DEEPSEEK_SNAPSHOT: OnceLock<Mutex<Option<super::ai_usage::DeepSeekBalanceSnapshot>>> = OnceLock::new();
 static DEEPSEEK_WORKER: OnceLock<Mutex<Option<super::ai_usage::DeepSeekWorker>>> = OnceLock::new();
 static AI_KEY_EDIT: std::sync::atomic::AtomicPtr<c_void> =
@@ -496,11 +522,9 @@ unsafe extern "system" fn window_proc(
                 right: 0,
                 bottom: 0,
             };
-            if GetWindowRect(hwnd, &mut rect) != 0 {
+            if !SNAP_TO_TASKBAR.load(Ordering::Relaxed) && GetWindowRect(hwnd, &mut rect) != 0 {
                 FREE_X.store(rect.left, Ordering::Relaxed);
-                if !SNAP_TO_TASKBAR.load(Ordering::Relaxed) {
-                    FREE_Y.store(rect.top, Ordering::Relaxed);
-                }
+                FREE_Y.store(rect.top, Ordering::Relaxed);
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
         }
@@ -1193,11 +1217,21 @@ unsafe extern "system" fn devices_window_proc(
             let length = GetWindowTextW(edit, text.as_mut_ptr(), text.len() as i32).max(0) as usize;
             let gpu_index = String::from_utf16_lossy(&text[..length]).trim().parse::<u32>()
                 .unwrap_or(0).min(15);
+            let update_index = SendMessageW(UPDATE_COMBO.load(Ordering::Relaxed),
+                0x0147, 0, 0).max(0) as usize;
+            let update_interval = [500, 1000, 2000, 5000]
+                .get(update_index).copied().unwrap_or(1000);
+            let checked = |index: usize| SendMessageW(
+                DEVICE_CHECKS[index].load(Ordering::Relaxed), BM_GETCHECK, 0, 0)
+                == BST_CHECKED as isize;
             if let Ok(mut config) = config_lock().lock() {
                 config.network_adapter = network;
                 config.selected_disks = if disks.is_empty() { "None".into() }
                     else { disks.join(";") };
                 config.gpu_index = gpu_index;
+                config.update_interval_ms = update_interval;
+                config.hide_on_fullscreen = checked(0);
+                config.show_disk_speed = checked(1);
                 let _ = config_store::save(&config_path(), &config);
             }
             let overlay = OVERLAY_HANDLE.load(Ordering::Relaxed);
@@ -1205,12 +1239,20 @@ unsafe extern "system" fn devices_window_proc(
             DestroyWindow(hwnd);
             0
         }
+        WM_COMMAND if (wparam & 0xffff) == DEVICES_APPEARANCE => {
+            open_appearance_window(hwnd);
+            0
+        }
         WM_CLOSE => { DestroyWindow(hwnd); 0 }
         WM_DESTROY => {
+            let appearance = APPEARANCE_HANDLE.swap(null_mut(), Ordering::Relaxed);
+            if !appearance.is_null() { DestroyWindow(appearance); }
             DEVICES_HANDLE.store(null_mut(), Ordering::Relaxed);
             NETWORK_COMBO.store(null_mut(), Ordering::Relaxed);
             DISK_LIST.store(null_mut(), Ordering::Relaxed);
             GPU_INDEX_EDIT.store(null_mut(), Ordering::Relaxed);
+            UPDATE_COMBO.store(null_mut(), Ordering::Relaxed);
+            for control in &DEVICE_CHECKS { control.store(null_mut(), Ordering::Relaxed); }
             0
         }
         _ => DefWindowProcW(hwnd, message, wparam, lparam),
@@ -1239,7 +1281,7 @@ unsafe fn open_devices_window(owner: Hwnd) {
     };
     if RegisterClassW(&class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS { return; }
     let window = CreateWindowExW(WS_EX_TOOLWINDOW, class_name.as_ptr(), title.as_ptr(),
-        WS_OVERLAPPEDWINDOW, 360, 160, 520, 470, owner, null_mut(), instance, null_mut());
+        WS_OVERLAPPEDWINDOW, 360, 120, 520, 560, owner, null_mut(), instance, null_mut());
     if window.is_null() { return; }
     DEVICES_HANDLE.store(window, Ordering::Relaxed);
     let config = config_lock().lock().map(|c| c.clone()).unwrap_or_default();
@@ -1284,8 +1326,147 @@ unsafe fn open_devices_window(owner: Hwnd) {
     let edit = devices_child(window, "EDIT", &config.gpu_index.to_string(), 0,
         345, 283, 95, 28, WS_BORDER | WS_TABSTOP);
     GPU_INDEX_EDIT.store(edit, Ordering::Relaxed);
+    devices_child(window, "STATIC", "Telemetry refresh", 0,
+        20, 330, 180, 24, 0);
+    let interval = devices_child(window, "COMBOBOX", "", 0,
+        205, 328, 175, 120, WS_VSCROLL | WS_TABSTOP | 0x0003);
+    for caption in ["0.5 seconds", "1 second", "2 seconds", "5 seconds"] {
+        let wide: Vec<u16> = caption.encode_utf16().chain(Some(0)).collect();
+        SendMessageW(interval, 0x0143, 0, wide.as_ptr() as isize);
+    }
+    let interval_index = [500, 1000, 2000, 5000]
+        .iter().position(|value| *value == config.update_interval_ms).unwrap_or(1);
+    SendMessageW(interval, 0x014E, interval_index, 0);
+    UPDATE_COMBO.store(interval, Ordering::Relaxed);
+    for (index, (caption, checked)) in [
+        ("Hide in fullscreen", config.hide_on_fullscreen),
+        ("Show disk activity", config.show_disk_speed),
+    ].iter().enumerate() {
+        let control = devices_child(window, "BUTTON", caption, 0,
+            20 + index as i32 * 225, 385, 220, 25, WS_TABSTOP | 0x0003);
+        DEVICE_CHECKS[index].store(control, Ordering::Relaxed);
+        if *checked { SendMessageW(control, BM_SETCHECK, BST_CHECKED, 0); }
+    }
     devices_child(window, "BUTTON", "Save selection", DEVICES_SAVE,
-        20, 350, 175, 36, WS_TABSTOP);
+        20, 440, 175, 36, WS_TABSTOP);
+    devices_child(window, "BUTTON", "Appearance...", DEVICES_APPEARANCE,
+        215, 440, 175, 36, WS_TABSTOP);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+}
+
+unsafe fn appearance_text(handle: Hwnd) -> String {
+    if handle.is_null() { return String::new(); }
+    let mut buffer = [0_u16; 260];
+    let length = GetWindowTextW(handle, buffer.as_mut_ptr(), buffer.len() as i32).max(0) as usize;
+    String::from_utf16_lossy(&buffer[..length]).trim().to_owned()
+}
+
+unsafe extern "system" fn appearance_window_proc(
+    hwnd: Hwnd, message: u32, wparam: usize, lparam: isize,
+) -> Lresult {
+    match message {
+        WM_COMMAND if (wparam & 0xffff) == APPEARANCE_SAVE => {
+            let values: Vec<String> = APPEARANCE_EDITS.iter()
+                .map(|control| appearance_text(control.load(Ordering::Relaxed))).collect();
+            let checks: Vec<bool> = APPEARANCE_CHECKS.iter().map(|control| {
+                SendMessageW(control.load(Ordering::Relaxed), BM_GETCHECK, 0, 0)
+                    == BST_CHECKED as isize
+            }).collect();
+            if let Ok(mut config) = config_lock().lock() {
+                config.accent_color_hex = values[0].clone();
+                config.label_color_hex = values[1].clone();
+                config.background_color_hex = values[2].clone();
+                config.pod_color_hex = values[3].clone();
+                config.scale_factor = values[4].parse().unwrap_or(1.0);
+                config.column_spacing = values[5].parse().unwrap_or(6);
+                config.font_family = values[6].clone();
+                config.theme = values[7].clone();
+                config.show_background = checks[0];
+                config.show_pods = checks[1];
+                config.is_text_bold = checks[2];
+                match config.theme.as_str() {
+                    "Dark" => {
+                        config.background_color_hex = "#D0181818".into();
+                        config.label_color_hex = "#75D8FF".into();
+                    }
+                    "Light" => {
+                        config.background_color_hex = "#DCF4F4F4".into();
+                        config.label_color_hex = "#245A80".into();
+                        config.accent_color_hex = "#202020".into();
+                    }
+                    "Neon" => {
+                        config.background_color_hex = "#E0101020".into();
+                        config.label_color_hex = "#00FFDD".into();
+                    }
+                    _ => {}
+                }
+                config.normalize();
+                let _ = config_store::save(&config_path(), &config);
+            }
+            let overlay = OVERLAY_HANDLE.load(Ordering::Relaxed);
+            if !overlay.is_null() { PostMessageW(overlay, WM_APP_REFRESH, 0, 0); }
+            DestroyWindow(hwnd);
+            0
+        }
+        WM_CLOSE => { DestroyWindow(hwnd); 0 }
+        WM_DESTROY => {
+            APPEARANCE_HANDLE.store(null_mut(), Ordering::Relaxed);
+            for edit in &APPEARANCE_EDITS { edit.store(null_mut(), Ordering::Relaxed); }
+            for check in &APPEARANCE_CHECKS { check.store(null_mut(), Ordering::Relaxed); }
+            0
+        }
+        _ => DefWindowProcW(hwnd, message, wparam, lparam),
+    }
+}
+
+unsafe fn open_appearance_window(owner: Hwnd) {
+    let existing = APPEARANCE_HANDLE.load(Ordering::Relaxed);
+    if !existing.is_null() { ShowWindow(existing, SW_SHOW); return; }
+    let class_name: Vec<u16> = "Kil0bitRustAppearance\0".encode_utf16().collect();
+    let title: Vec<u16> = "Overlay appearance\0".encode_utf16().collect();
+    let instance = GetModuleHandleW(null());
+    let class = WindowClass {
+        style: 0, window_proc: Some(appearance_window_proc), class_extra: 0,
+        window_extra: 0, instance, icon: null_mut(), cursor: null_mut(),
+        background: null_mut(), menu_name: null(), class_name: class_name.as_ptr(),
+    };
+    if RegisterClassW(&class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS { return; }
+    let window = CreateWindowExW(WS_EX_TOOLWINDOW, class_name.as_ptr(), title.as_ptr(),
+        WS_OVERLAPPEDWINDOW, 480, 120, 480, 610, owner, null_mut(), instance, null_mut());
+    if window.is_null() { return; }
+    APPEARANCE_HANDLE.store(window, Ordering::Relaxed);
+    let config = config_lock().lock().map(|c| c.clone()).unwrap_or_default();
+    let values = [
+        ("Value color", config.accent_color_hex),
+        ("Label color", config.label_color_hex),
+        ("Background color", config.background_color_hex),
+        ("Capsule color", config.pod_color_hex),
+        ("Scale (0.5-2.0)", config.scale_factor.to_string()),
+        ("Spacing (0-20)", config.column_spacing.to_string()),
+        ("Font family", config.font_family),
+        ("Theme (Default/Dark/Light/Neon)", config.theme),
+    ];
+    for (index, (label, value)) in values.iter().enumerate() {
+        let y = 20 + index as i32 * 49;
+        devices_child(window, "STATIC", label, 0, 20, y, 410, 20, 0);
+        let edit = devices_child(window, "EDIT", value, 0, 20, y + 19, 410, 27,
+            WS_BORDER | WS_TABSTOP);
+        APPEARANCE_EDITS[index].store(edit, Ordering::Relaxed);
+    }
+    let config = config_lock().lock().map(|c| c.clone()).unwrap_or_default();
+    for (index, (caption, checked)) in [
+        ("Background", config.show_background),
+        ("Capsules", config.show_pods),
+        ("Bold text", config.is_text_bold),
+    ].iter().enumerate() {
+        let control = devices_child(window, "BUTTON", caption, 0,
+            20 + index as i32 * 140, 425, 135, 26, WS_TABSTOP | 0x0003);
+        APPEARANCE_CHECKS[index].store(control, Ordering::Relaxed);
+        if *checked { SendMessageW(control, BM_SETCHECK, BST_CHECKED, 0); }
+    }
+    devices_child(window, "BUTTON", "Save appearance", APPEARANCE_SAVE,
+        20, 480, 200, 36, WS_TABSTOP);
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
 }
@@ -1789,6 +1970,10 @@ unsafe fn show_context_menu(hwnd: Hwnd) {
         MENU_TOGGLE_TOPMOST as usize,
         topmost_text.as_ptr(),
     );
+    let fullscreen_text: Vec<u16> = "Hide in Fullscreen\0".encode_utf16().collect();
+    AppendMenuW(menu,
+        MF_STRING | if config.hide_on_fullscreen { MF_CHECKED } else { 0 },
+        MENU_TOGGLE_FULLSCREEN as usize, fullscreen_text.as_ptr());
     let task_text: Vec<u16> = "Task Manager\0".encode_utf16().collect();
     AppendMenuW(
         menu,
@@ -1821,7 +2006,8 @@ unsafe fn show_context_menu(hwnd: Hwnd) {
                 if SNAP_TO_TASKBAR.load(Ordering::Relaxed) {
                     detach_from_taskbar(hwnd);
                 } else {
-                    attach_to_taskbar(hwnd, 52);
+                    let (_, _, height) = render_current_bitmap();
+                    attach_to_taskbar(hwnd, height);
                 }
                 save_position();
             }
@@ -1857,6 +2043,14 @@ unsafe fn show_context_menu(hwnd: Hwnd) {
                     );
                     let _ = config_store::save(&config_path(), &config);
                 }
+            }
+            MENU_TOGGLE_FULLSCREEN => {
+                if let Ok(mut config) = config_lock().lock() {
+                    config.hide_on_fullscreen = !config.hide_on_fullscreen;
+                    let _ = config_store::save(&config_path(), &config);
+                }
+                update_fullscreen_visibility(hwnd);
+                refresh_overlay(hwnd);
             }
             MENU_ABOUT => {
                 let text: Vec<u16> =

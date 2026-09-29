@@ -131,13 +131,32 @@ pub fn build_metrics_bitmap(
         }
     }
     let mut glyphs = Vec::new();
+    let default_label = parse_hex_bgr(&config.label_color_hex).unwrap_or(global_color);
+    let no_override: Option<String> = None;
     for (index, (field, color)) in fields.iter().enumerate() {
         if index > 0 {
             for _ in 0..(2 + config.column_spacing / 3) {
                 glyphs.push((' ', global_color));
             }
         }
-        glyphs.extend(field.chars().map(|ch| (ch, *color)));
+        let (label, value) = field.split_once(' ').unwrap_or((field, ""));
+        let (label_override, value_override) = match label {
+            "UP" | "DOWN" | "U" | "D" =>
+                (&config.net_label_color_hex, &config.net_accent_color_hex),
+            "CPU" | "RAM" | "C" | "R" =>
+                (&config.cpu_ram_label_color_hex, &config.cpu_ram_accent_color_hex),
+            "GPU" | "TEMP" | "G" | "T" =>
+                (&config.gpu_label_color_hex, &config.gpu_accent_color_hex),
+            "DISK" | "ACT" | "K" | "A" =>
+                (&config.disk_label_color_hex, &config.disk_accent_color_hex),
+            "5H" | "W" | "M" | "DS" => (&no_override, &no_override),
+            _ => (&config.disk_label_color_hex, &config.disk_accent_color_hex),
+        };
+        let label_color = label_override.as_deref().and_then(parse_hex_bgr).unwrap_or(default_label);
+        let value_color = value_override.as_deref().and_then(parse_hex_bgr).unwrap_or(*color);
+        glyphs.extend(label.chars().map(|ch| (ch, label_color)));
+        glyphs.push((' ', label_color));
+        glyphs.extend(value.chars().map(|ch| (ch, value_color)));
     }
     let char_count = glyphs.len() as i32;
     let width = (32 + char_count * 12).max(52);
@@ -189,6 +208,11 @@ pub fn build_metrics_bitmap(
                                 *color,
                                 255,
                             );
+                            if config.is_text_bold && sx == scale - 1 {
+                                put_pixel_sized(&mut pixels, width,
+                                    origin_x + index as i32 * 12 + col * scale + sx + 1,
+                                    origin_y + row as i32 * scale + sy, *color, 255);
+                            }
                         }
                     }
                 }
@@ -423,6 +447,7 @@ mod tests {
             show_gpu: false,
             show_temp: false,
             show_disk: false,
+            show_disk_speed: false,
             show_net_up: false,
             show_net_down: false,
             ..system_monitor_core::AppConfig::default()
@@ -430,7 +455,7 @@ mod tests {
         let (pixels, width, height) = build_metrics_bitmap(&metrics, &config, None, None, false);
         assert_eq!(height, HEIGHT);
         assert!(width > 52);
-        assert!(pixels.as_chunks::<4>().0.contains(&[242, 242, 242, 255]));
+        assert!(pixels.as_chunks::<4>().0.contains(&[255, 255, 255, 255]));
 
         let empty = system_monitor_core::AppConfig {
             show_cpu: false,
@@ -438,6 +463,7 @@ mod tests {
             show_gpu: false,
             show_temp: false,
             show_disk: false,
+            show_disk_speed: false,
             show_net_up: false,
             show_net_down: false,
             ..system_monitor_core::AppConfig::default()
