@@ -12,7 +12,10 @@ mod windows_smoke {
     const GWL_EXSTYLE: i32 = -20;
     const WS_EX_LAYERED: isize = 0x0008_0000;
     const WM_RBUTTONUP: u32 = 0x0205;
+    const WM_NCHITTEST: u32 = 0x0084;
     const WM_CLOSE: u32 = 0x0010;
+    const HTCLIENT: isize = 1;
+    const HTCAPTION: isize = 2;
     const INPUT_MOUSE: u32 = 0;
     const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
     const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
@@ -26,6 +29,7 @@ mod windows_smoke {
         fn IsWindowVisible(hwnd: Hwnd) -> i32;
         fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
         fn PostMessageW(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> i32;
+        fn SendMessageW(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize;
         fn SetCursorPos(x: i32, y: i32) -> i32;
         fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
         fn GetDC(hwnd: Hwnd) -> Hwnd;
@@ -181,7 +185,40 @@ mod windows_smoke {
         if unsafe { SetCursorPos(menu_rect.right - 10, target_y) } == 0 {
             return Err("could not move pointer to the selected context menu item".into());
         }
-        click_left()
+        click_left()?;
+        // The input is queued to the overlay's UI thread; let TrackPopupMenu
+        // return and apply the selected command before driving another action.
+        thread::sleep(Duration::from_millis(150));
+        Ok(())
+    }
+
+    fn wait_for_lock_state(hwnd: Hwnd, locked: bool) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let mut rect = Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+                return Err("could not read overlay bounds for hit test".into());
+            }
+            let x = (rect.left + rect.right) / 2;
+            let y = (rect.top + rect.bottom) / 2;
+            let point = ((y as u16 as usize) << 16 | (x as u16 as usize)) as isize;
+            let hit = unsafe { SendMessageW(hwnd, WM_NCHITTEST, 0, point) };
+            if hit == (if locked { HTCLIENT } else { HTCAPTION }) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "lock menu did not set hit test state to {} (got {hit})",
+                    if locked { "locked" } else { "unlocked" }
+                ));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     fn drag_window(hwnd: Hwnd, dx: i32, dy: i32) -> Result<(Rect, Rect), String> {
@@ -493,6 +530,7 @@ mod windows_smoke {
             let _ = child.wait();
             return Err(error);
         }
+        wait_for_lock_state(hwnd, true)?;
         let (locked_before, locked_after) = match drag_window(hwnd, 36, 28) {
             Ok(bounds) => bounds,
             Err(error) => {
@@ -511,6 +549,7 @@ mod windows_smoke {
             let _ = child.wait();
             return Err(error);
         }
+        wait_for_lock_state(hwnd, false)?;
         let (unlocked_again_before, unlocked_again_after) = match drag_window(hwnd, 36, 28) {
             Ok(bounds) => bounds,
             Err(error) => {
