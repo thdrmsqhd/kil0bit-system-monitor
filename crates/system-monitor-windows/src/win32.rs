@@ -1426,6 +1426,7 @@ unsafe extern "system" fn appearance_window_proc(
                     == BST_CHECKED as isize
             }).collect();
             if let Ok(mut config) = config_lock().lock() {
+                let theme_changed = config.theme != values[7];
                 config.accent_color_hex = values[0].clone();
                 config.label_color_hex = values[1].clone();
                 config.background_color_hex = values[2].clone();
@@ -1437,8 +1438,10 @@ unsafe extern "system" fn appearance_window_proc(
                 config.show_background = checks[0];
                 config.show_pods = checks[1];
                 config.is_text_bold = checks[2];
-                let theme = config.theme.clone();
-                config.apply_theme(&theme);
+                if theme_changed {
+                    let theme = config.theme.clone();
+                    config.apply_theme(&theme);
+                }
                 config.normalize();
                 let _ = config_store::save(&config_path(), &config);
             }
@@ -1493,11 +1496,12 @@ unsafe fn open_appearance_window(owner: Hwnd) {
                 WS_TABSTOP | 0x0003 | 0x0040);
             let presets = ["Default", "Cyberpunk", "Matrix", "Stealth", "Synthwave",
                 "Midnight Gold", "Frost", "Inferno", "Toxic", "Nordic"];
-            for (choice, name) in presets.iter().enumerate() {
+            for name in presets {
                 let encoded: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
                 SendMessageW(combo, 0x0143, 0, encoded.as_ptr() as isize);
-                if name == value { SendMessageW(combo, 0x014e, choice, 0); }
             }
+            let selected = presets.iter().position(|name| *name == value).unwrap_or(0);
+            SendMessageW(combo, 0x014e, selected, 0);
             combo
         } else {
             devices_child(window, "EDIT", value, 0, 20, y + 19, 410, 27,
