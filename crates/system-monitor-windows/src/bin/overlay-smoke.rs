@@ -222,6 +222,9 @@ mod windows_smoke {
     }
 
     fn drag_window(hwnd: Hwnd, dx: i32, dy: i32) -> Result<(Rect, Rect), String> {
+        if unsafe { IsWindowVisible(hwnd) } == 0 {
+            return Err("overlay became hidden before drag".into());
+        }
         let mut before = Rect {
             left: 0,
             top: 0,
@@ -260,9 +263,17 @@ mod windows_smoke {
         let executable = std::env::args_os()
             .nth(1)
             .ok_or("usage: overlay-smoke <path-to-system-monitor-windows.exe>")?;
-        let position_file = std::env::temp_dir().join("kil0bit-rust-overlay-pot-position.txt");
-        let _ = std::fs::remove_file(&position_file);
+        let profile = std::env::temp_dir().join(format!("kil0bit-rust-smoke-{}", std::process::id()));
+        let settings_dir = profile.join("Kil0bitSystemMonitorRust");
+        std::fs::create_dir_all(&settings_dir)
+            .map_err(|error| format!("create isolated smoke profile: {error}"))?;
+        std::fs::write(
+            settings_dir.join("config.json"),
+            br#"{"HideOnFullscreen":false,"StickToTaskbar":true,"LockPosition":false,"X":100,"Y":100}"#,
+        )
+        .map_err(|error| format!("write isolated smoke config: {error}"))?;
         let mut child = Command::new(executable.clone())
+            .env("APPDATA", &profile)
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -417,6 +428,7 @@ mod windows_smoke {
         }
         let mut second_instance = Command::new(executable.clone())
             .arg("--startup")
+            .env("APPDATA", &profile)
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -594,9 +606,9 @@ mod windows_smoke {
             }
             thread::sleep(Duration::from_millis(100));
         }
-        let _ = std::fs::remove_file(&position_file);
         let mut restarted = Command::new(executable)
             .arg("--startup")
+            .env("APPDATA", &profile)
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -652,7 +664,7 @@ mod windows_smoke {
             }
             thread::sleep(Duration::from_millis(100));
         }
-        let _ = std::fs::remove_file(&position_file);
+        let _ = std::fs::remove_dir_all(profile);
         Ok(())
     }
 }
