@@ -556,6 +556,7 @@ mod windows_smoke {
             }
         }
 
+        wait_for_lock_state(hwnd, false)?;
         let (unlocked_before, unlocked_after) = match drag_window(hwnd, 36, 28) {
             Ok(bounds) => bounds,
             Err(error) => {
@@ -568,7 +569,10 @@ mod windows_smoke {
         {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("unlocked overlay did not move in response to drag".into());
+            return Err(format!(
+                "unlocked overlay did not move in response to drag: ({}, {}) -> ({}, {})",
+                unlocked_before.left, unlocked_before.top, unlocked_after.left, unlocked_after.top
+            ));
         }
         if let Err(error) = click_context_item(hwnd, 0) {
             let _ = child.kill();
