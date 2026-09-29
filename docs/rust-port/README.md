@@ -1,6 +1,6 @@
 # Rust port status and use
 
-> **상태 (2026-09-29): 진행 중이며 완료되지 않았습니다.** 최신 Windows CI의 포맷·Clippy·테스트·릴리스 빌드·패키지 생성은 통과했지만, Win32 드래그 smoke는 실패했습니다. 상세 인수인계는 [`handoff-2026-09-29.md`](handoff-2026-09-29.md)를 참고하세요.
+> **상태 (2026-09-29): 진행 중이며 완료되지 않았습니다.** 최신 완료 Windows CI의 포맷·Clippy·테스트·릴리스 빌드·패키지 생성은 통과했지만, Win32 드래그 smoke는 실패했습니다. 상세 인수인계는 [`handoff-2026-09-29.md`](handoff-2026-09-29.md)를 참고하세요.
 
 This fork keeps the upstream C# application as its source reference and develops a separate native Rust implementation. Work happens on `rust/phase-0`; `main` remains the upstream synchronization branch. The original project files and installation are not modified by the Rust application.
 
