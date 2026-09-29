@@ -31,12 +31,6 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_CLOSE: u32 = 0x0010;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_NCHITTEST: u32 = 0x0084;
-const WM_NCLBUTTONDOWN: u32 = 0x00A1;
-const WM_NCLBUTTONUP: u32 = 0x00A2;
-const WM_LBUTTONDOWN: u32 = 0x0201;
-const WM_LBUTTONUP: u32 = 0x0202;
-const WM_MOUSEMOVE: u32 = 0x0200;
-const WM_NCMOUSEMOVE: u32 = 0x00a0;
 const WM_RBUTTONUP: u32 = 0x0205;
 const WM_MOVE: u32 = 0x0003;
 const WM_WINDOWPOSCHANGED: u32 = 0x0047;
@@ -110,7 +104,6 @@ const SW_SHOW: i32 = 5;
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 const ERROR_ALREADY_EXISTS: u32 = 183;
 static POSITION_LOCKED: AtomicBool = AtomicBool::new(false);
-static DRAG_ORIGIN: Mutex<Option<(Point, Point)>> = Mutex::new(None);
 static SNAP_TO_TASKBAR: AtomicBool = AtomicBool::new(true);
 static APPBAR_REGISTERED: AtomicBool = AtomicBool::new(false);
 static FREE_X: AtomicI32 = AtomicI32::new(100);
@@ -345,8 +338,6 @@ extern "system" {
     fn CreatePopupMenu() -> *mut c_void;
     fn AppendMenuW(menu: *mut c_void, flags: u32, item_id: usize, text: *const u16) -> i32;
     fn GetCursorPos(point: *mut Point) -> i32;
-    fn SetCapture(hwnd: Hwnd) -> Hwnd;
-    fn ReleaseCapture() -> i32;
     fn TrackPopupMenu(
         menu: *mut c_void,
         flags: u32,
@@ -459,39 +450,6 @@ unsafe extern "system" fn window_proc(
     match message {
         WM_NCHITTEST if POSITION_LOCKED.load(Ordering::Relaxed) => HTCLIENT,
         WM_NCHITTEST => HTCAPTION,
-        WM_NCLBUTTONDOWN | WM_LBUTTONDOWN if !POSITION_LOCKED.load(Ordering::Relaxed) => {
-            let mut cursor = Point { x: 0, y: 0 };
-            let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
-            if GetCursorPos(&mut cursor) != 0 && GetWindowRect(hwnd, &mut rect) != 0 {
-                if let Ok(mut drag) = DRAG_ORIGIN.lock() {
-                    *drag = Some((cursor, Point { x: rect.left, y: rect.top }));
-                }
-                SetCapture(hwnd);
-            }
-            0
-        }
-        WM_MOUSEMOVE | WM_NCMOUSEMOVE => {
-            if let Ok(drag) = DRAG_ORIGIN.lock() {
-                if let Some((cursor_start, window_start)) = *drag {
-                    let mut cursor = Point { x: 0, y: 0 };
-                    if GetCursorPos(&mut cursor) != 0 {
-                        SetWindowPos(hwnd, null_mut(), window_start.x + cursor.x - cursor_start.x,
-                            window_start.y + cursor.y - cursor_start.y, 0, 0,
-                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-                    }
-                }
-            }
-            0
-        }
-        WM_NCLBUTTONUP | WM_LBUTTONUP => {
-            if let Ok(mut drag) = DRAG_ORIGIN.lock() {
-                if drag.take().is_some() {
-                    ReleaseCapture();
-                    save_position();
-                }
-            }
-            0
-        }
         WM_CLOSE => {
             DestroyWindow(hwnd);
             0
