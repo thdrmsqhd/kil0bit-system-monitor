@@ -1119,16 +1119,7 @@ unsafe extern "system" fn maintenance_window_proc(
                     let _ = config_store::save(&config_path(), &config);
                 }
                 load_config();
-                if let Some(worker) = AI_WORKER.get()
-                    .and_then(|v| v.lock().ok()).and_then(|mut v| v.take()) { drop(worker); }
-                if let Some(worker) = DEEPSEEK_WORKER.get()
-                    .and_then(|v| v.lock().ok()).and_then(|mut v| v.take()) { drop(worker); }
-                if let Some(value) = AI_SNAPSHOT.get() {
-                    if let Ok(mut value) = value.lock() { *value = None; }
-                }
-                if let Some(value) = DEEPSEEK_SNAPSHOT.get() {
-                    if let Ok(mut value) = value.lock() { *value = None; }
-                }
+                apply_loaded_config();
                 maintenance_refresh();
             }
             0
@@ -1145,8 +1136,7 @@ unsafe extern "system" fn maintenance_window_proc(
                     let _ = config_store::save(&config_path(), &current);
                 }
                 load_config();
-                start_ai_worker(OVERLAY_HANDLE.load(Ordering::Relaxed));
-                start_deepseek_worker(OVERLAY_HANDLE.load(Ordering::Relaxed));
+                apply_loaded_config();
                 maintenance_refresh();
                 format!("Legacy settings imported without changing the original file. Unsupported keys: {}",
                     if unsupported.is_empty() { "none".into() } else { unsupported.join(", ") })
@@ -1161,6 +1151,7 @@ unsafe extern "system" fn maintenance_window_proc(
                 let result = config_store::restore_backup(&config_path());
                 if result.is_ok() {
                     load_config();
+                    apply_loaded_config();
                     maintenance_refresh();
                 } else {
                     let wide: Vec<u16> = "No valid settings backup was found.\0".encode_utf16().collect();
@@ -1190,6 +1181,36 @@ unsafe fn maintenance_refresh() {
         DestroyWindow(settings);
         if !overlay.is_null() { open_settings_window(overlay); }
     }
+}
+
+unsafe fn apply_loaded_config() {
+    let overlay = OVERLAY_HANDLE.load(Ordering::Relaxed);
+    if overlay.is_null() { return; }
+    let config = config_lock().lock().map(|c| c.clone()).unwrap_or_default();
+    if config.stick_to_taskbar {
+        let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+        let height = if GetWindowRect(overlay, &mut rect) != 0 {
+            (rect.bottom - rect.top).max(1)
+        } else { 52 };
+        attach_to_taskbar(overlay, height);
+    } else {
+        detach_from_taskbar(overlay);
+    }
+    SetWindowPos(overlay, if config.always_on_top { HWND_TOPMOST } else { HWND_NOTOPMOST },
+        0, 0, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | 0x0002);
+    ShowWindow(overlay, if config.show_overlay { SW_SHOWNOACTIVATE } else { 0 });
+    if let Some(worker) = AI_WORKER.get()
+        .and_then(|v| v.lock().ok()).and_then(|mut v| v.take()) { drop(worker); }
+    if let Some(worker) = DEEPSEEK_WORKER.get()
+        .and_then(|v| v.lock().ok()).and_then(|mut v| v.take()) { drop(worker); }
+    if let Some(snapshot) = AI_SNAPSHOT.get() {
+        if let Ok(mut value) = snapshot.lock() { *value = None; }
+    }
+    if let Some(snapshot) = DEEPSEEK_SNAPSHOT.get() {
+        if let Ok(mut value) = snapshot.lock() { *value = None; }
+    }
+    start_ai_worker(overlay);
+    start_deepseek_worker(overlay);
 }
 
 unsafe fn open_maintenance_window(owner: Hwnd) {
