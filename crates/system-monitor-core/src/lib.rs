@@ -121,6 +121,32 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// Apply the source application's theme presets to the corresponding appearance fields.
+    pub fn apply_theme(&mut self, name: &str) -> bool {
+        let (accent, label, background, bold, font) = match name {
+            "Cyberpunk" => ("#FF00FF", "#FFFF00", "#B4200020", true, None),
+            "Matrix" => ("#32CD32", "#00FF00", "#B4001000", true, Some("Consolas")),
+            "Stealth" => ("#AAAAAA", "#444444", "#64101010", false, None),
+            "Synthwave" => ("#BD00FF", "#00E0FF", "#B4100520", true, None),
+            "Midnight Gold" => ("#D4AF37", "#F5F5F5", "#B4050505", true, None),
+            "Frost" => ("#E0FFFF", "#00BFFF", "#B41A2533", true, None),
+            "Inferno" => ("#FF4500", "#990000", "#B4100505", true, None),
+            "Toxic" => ("#9400D3", "#00FF00", "#B4051000", true, None),
+            "Nordic" => ("#4682B4", "#FFFAFA", "#B4101A25", false, Some("Inter")),
+            "Default" => ("#FFFFFF", "#00CCFF", "#B4141414", true, Some("Segoe UI")),
+            _ => return false,
+        };
+        self.theme = name.into();
+        self.accent_color_hex = accent.into();
+        self.label_color_hex = label.into();
+        self.background_color_hex = background.into();
+        self.is_text_bold = bold;
+        if let Some(font) = font {
+            self.font_family = font.into();
+        }
+        true
+    }
+
     /// Clamp persisted values to the original settings' supported ranges.
     pub fn normalize(&mut self) {
         self.schema_version = 1;

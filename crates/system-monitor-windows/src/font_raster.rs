@@ -2,6 +2,7 @@
 //! A fixed cell keeps metric widths stable as live values change.
 
 #[cfg(windows)]
+#[allow(clippy::too_many_arguments)] // Surface, text, position, and font are separate drawing inputs.
 pub fn draw_text(
     pixels: &mut [u8], width: i32, height: i32,
     glyphs: &[(char, [u8; 3])], origin_x: i32, origin_y: i32,
@@ -23,7 +24,8 @@ pub fn draw_text(
     extern "system" {
         fn CreateCompatibleDC(dc: Handle) -> Handle;
         fn DeleteDC(dc: Handle) -> i32;
-        fn CreateDIBSection(dc: Handle, info: *const BitmapInfo, usage: u32,
+        #[link_name = "CreateDIBSection"]
+        fn create_font_dib_section(dc: Handle, info: *const c_void, usage: u32,
             bits: *mut Handle, section: Handle, offset: u32) -> Handle;
         fn CreateFontW(height: i32, width: i32, escapement: i32, orientation: i32,
             weight: i32, italic: u32, underline: u32, strike: u32,
@@ -48,7 +50,8 @@ pub fn draw_text(
             }, colors: [0],
         };
         let mut bits = null_mut();
-        let bitmap = CreateDIBSection(dc, &info, 0, &mut bits, null_mut(), 0);
+        let bitmap = create_font_dib_section(dc, (&info as *const BitmapInfo).cast(),
+            0, &mut bits, null_mut(), 0);
         if bitmap.is_null() || bits.is_null() { DeleteDC(dc); return false; }
         let face: Vec<u16> = family.encode_utf16().chain(Some(0)).collect();
         let font = CreateFontW(-15, 0, 0, 0, if bold { 700 } else { 400 },

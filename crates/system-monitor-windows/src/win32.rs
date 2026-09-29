@@ -36,6 +36,7 @@ const WM_NCLBUTTONUP: u32 = 0x00A2;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_NCMOUSEMOVE: u32 = 0x00a0;
 const WM_RBUTTONUP: u32 = 0x0205;
 const WM_MOVE: u32 = 0x0003;
 const WM_WINDOWPOSCHANGED: u32 = 0x0047;
@@ -410,7 +411,7 @@ extern "system" {
     fn DeleteDC(dc: Hdc) -> i32;
     fn CreateDIBSection(
         dc: Hdc,
-        info: *const BitmapInfo,
+        info: *const c_void,
         usage: u32,
         bits: *mut *mut c_void,
         section: *mut c_void,
@@ -462,7 +463,7 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_MOUSEMOVE => {
+        WM_MOUSEMOVE | WM_NCMOUSEMOVE => {
             if let Ok(drag) = DRAG_ORIGIN.lock() {
                 if let Some((cursor_start, window_start)) = *drag {
                     let mut cursor = Point { x: 0, y: 0 };
@@ -1425,22 +1426,8 @@ unsafe extern "system" fn appearance_window_proc(
                 config.show_background = checks[0];
                 config.show_pods = checks[1];
                 config.is_text_bold = checks[2];
-                match config.theme.as_str() {
-                    "Dark" => {
-                        config.background_color_hex = "#D0181818".into();
-                        config.label_color_hex = "#75D8FF".into();
-                    }
-                    "Light" => {
-                        config.background_color_hex = "#DCF4F4F4".into();
-                        config.label_color_hex = "#245A80".into();
-                        config.accent_color_hex = "#202020".into();
-                    }
-                    "Neon" => {
-                        config.background_color_hex = "#E0101020".into();
-                        config.label_color_hex = "#00FFDD".into();
-                    }
-                    _ => {}
-                }
+                let theme = config.theme.clone();
+                config.apply_theme(&theme);
                 config.normalize();
                 let _ = config_store::save(&config_path(), &config);
             }
@@ -1485,13 +1472,26 @@ unsafe fn open_appearance_window(owner: Hwnd) {
         ("Scale (0.5-2.0)", config.scale_factor.to_string()),
         ("Spacing (0-20)", config.column_spacing.to_string()),
         ("Font family", config.font_family),
-        ("Theme (Default/Dark/Light/Neon)", config.theme),
+        ("Theme preset", config.theme),
     ];
     for (index, (label, value)) in values.iter().enumerate() {
         let y = 20 + index as i32 * 49;
         devices_child(window, "STATIC", label, 0, 20, y, 410, 20, 0);
-        let edit = devices_child(window, "EDIT", value, 0, 20, y + 19, 410, 27,
-            WS_BORDER | WS_TABSTOP);
+        let edit = if index == 7 {
+            let combo = devices_child(window, "COMBOBOX", "", 0, 20, y + 19, 410, 265,
+                WS_TABSTOP | 0x0003 | 0x0040);
+            let presets = ["Default", "Cyberpunk", "Matrix", "Stealth", "Synthwave",
+                "Midnight Gold", "Frost", "Inferno", "Toxic", "Nordic"];
+            for (choice, name) in presets.iter().enumerate() {
+                let encoded: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+                SendMessageW(combo, 0x0143, 0, encoded.as_ptr() as isize);
+                if name == value { SendMessageW(combo, 0x014e, choice, 0); }
+            }
+            combo
+        } else {
+            devices_child(window, "EDIT", value, 0, 20, y + 19, 410, 27,
+                WS_BORDER | WS_TABSTOP)
+        };
         APPEARANCE_EDITS[index].store(edit, Ordering::Relaxed);
     }
     let config = config_lock().lock().map(|c| c.clone()).unwrap_or_default();
@@ -2572,7 +2572,8 @@ unsafe fn present_bitmap(
         }],
     };
     let mut bits = null_mut();
-    let bitmap = CreateDIBSection(screen_dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+    let bitmap = CreateDIBSection(screen_dc, (&info as *const BitmapInfo).cast(),
+        DIB_RGB_COLORS, &mut bits, null_mut(), 0);
     if bitmap.is_null() || bits.is_null() {
         DeleteDC(memory_dc);
         ReleaseDC(null_mut(), screen_dc);
