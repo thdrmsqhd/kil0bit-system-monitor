@@ -245,8 +245,7 @@ mod windows_smoke {
         let center_x = (before.left + before.right) / 2;
         let center_y = (before.top + before.bottom) / 2;
         let mut target = None;
-        for radius in (0..(before.right - before.left).max(before.bottom - before.top)).step_by(3)
-        {
+        for radius in (0..(before.right - before.left).max(before.bottom - before.top)).step_by(3) {
             for y in (center_y - radius..=center_y + radius).step_by(3) {
                 if y < before.top || y >= before.bottom {
                     continue;
