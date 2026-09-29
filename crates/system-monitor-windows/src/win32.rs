@@ -2698,6 +2698,11 @@ unsafe fn present_bitmap(
         return Err(last_error("CreateDIBSection"));
     }
     std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u8>(), pixels.len());
+    // A zero-alpha pixel in a layered window is hit-test transparent. Keep
+    // the transparent appearance while making the surface receive pointer
+    // input so WM_NCHITTEST can return HTCAPTION for dragging.
+    let surface = std::slice::from_raw_parts_mut(bits.cast::<u8>(), pixels.len());
+    preserve_layered_input_surface(surface);
     let old_bitmap = SelectObject(memory_dc, bitmap);
     let mut window_rect = Rect {
         left: 100,
@@ -2742,6 +2747,29 @@ unsafe fn present_bitmap(
     Ok(())
 }
 
+fn preserve_layered_input_surface(surface: &mut [u8]) {
+    for pixel in surface.as_chunks_mut::<4>().0 {
+        if pixel[3] == 0 {
+            pixel[..3].fill(0);
+            pixel[3] = 1;
+        }
+    }
+}
+
 unsafe fn last_error(operation: &'static str) -> WinError {
     WinError(operation, GetLastError())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preserve_layered_input_surface;
+
+    #[test]
+    fn transparent_pixels_remain_visually_black_but_receive_input() {
+        let mut surface = [0, 0, 0, 0, 12, 24, 36, 128, 90, 80, 70, 255];
+        preserve_layered_input_surface(&mut surface);
+        assert_eq!(&surface[0..4], &[0, 0, 0, 1]);
+        assert_eq!(&surface[4..8], &[12, 24, 36, 128]);
+        assert_eq!(&surface[8..12], &[90, 80, 70, 255]);
+    }
 }
