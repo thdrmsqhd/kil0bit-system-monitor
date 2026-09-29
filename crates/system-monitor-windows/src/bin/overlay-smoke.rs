@@ -13,6 +13,7 @@ mod windows_smoke {
     const WS_EX_LAYERED: isize = 0x0008_0000;
     const WM_RBUTTONUP: u32 = 0x0205;
     const WM_NCHITTEST: u32 = 0x0084;
+    const WM_APP_DRAG_DIAGNOSTIC: u32 = 0x8003;
     const WM_CLOSE: u32 = 0x0010;
     const HTCLIENT: isize = 1;
     const HTCAPTION: isize = 2;
@@ -300,6 +301,15 @@ mod windows_smoke {
         };
         if unsafe { GetWindowRect(hwnd, &mut after) } == 0 {
             return Err("could not read overlay bounds after drag".into());
+        }
+        if before.left == after.left && before.top == after.top {
+            let counts: Vec<_> = (0..4).map(|index|
+                unsafe { SendMessageW(hwnd, WM_APP_DRAG_DIAGNOSTIC, index, 0) }).collect();
+            return Err(format!(
+                "unlocked overlay did not move in response to drag: ({}, {}) -> ({}, {}); nc_down={}, client_down={}, client_move={}, window_move={}",
+                before.left, before.top, after.left, after.top,
+                counts[0], counts[1], counts[2], counts[3],
+            ));
         }
         Ok((before, after))
     }

@@ -211,7 +211,7 @@ impl Default for TelemetryCollector {
     }
 }
 
-fn is_eligible_adapter(name: &str) -> bool {
+pub(crate) fn is_eligible_adapter(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     !(lower.contains("loopback") || lower.contains("virtual") || lower.contains("pseudo"))
 }

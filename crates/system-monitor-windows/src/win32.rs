@@ -31,6 +31,9 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_CLOSE: u32 = 0x0010;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_NCHITTEST: u32 = 0x0084;
+const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_RBUTTONUP: u32 = 0x0205;
 const WM_MOVE: u32 = 0x0003;
 const WM_WINDOWPOSCHANGED: u32 = 0x0047;
@@ -43,6 +46,7 @@ const WM_TIMER: u32 = 0x0113;
 const FADE_TIMER_ID: usize = 2;
 const WM_APP_REFRESH: u32 = 0x8001;
 const WM_APP_SHOW_SETTINGS: u32 = 0x8002;
+const WM_APP_DRAG_DIAGNOSTIC: u32 = 0x8003;
 const GWLP_HWNDPARENT: i32 = -8;
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOZORDER: u32 = 0x0004;
@@ -104,6 +108,10 @@ const SW_SHOW: i32 = 5;
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 const ERROR_ALREADY_EXISTS: u32 = 183;
 static POSITION_LOCKED: AtomicBool = AtomicBool::new(false);
+static DRAG_NC_DOWN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static DRAG_CLIENT_DOWN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static DRAG_CLIENT_MOVE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static DRAG_WINDOW_MOVE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static SNAP_TO_TASKBAR: AtomicBool = AtomicBool::new(true);
 static APPBAR_REGISTERED: AtomicBool = AtomicBool::new(false);
 static FREE_X: AtomicI32 = AtomicI32::new(100);
@@ -448,6 +456,20 @@ unsafe extern "system" fn window_proc(
     lparam: isize,
 ) -> Lresult {
     match message {
+        WM_NCLBUTTONDOWN => { DRAG_NC_DOWN.fetch_add(1, Ordering::Relaxed); }
+        WM_LBUTTONDOWN => { DRAG_CLIENT_DOWN.fetch_add(1, Ordering::Relaxed); }
+        WM_MOUSEMOVE => { DRAG_CLIENT_MOVE.fetch_add(1, Ordering::Relaxed); }
+        WM_MOVE => { DRAG_WINDOW_MOVE.fetch_add(1, Ordering::Relaxed); }
+        _ => {}
+    }
+    match message {
+        WM_APP_DRAG_DIAGNOSTIC => match wparam {
+            0 => DRAG_NC_DOWN.load(Ordering::Relaxed) as isize,
+            1 => DRAG_CLIENT_DOWN.load(Ordering::Relaxed) as isize,
+            2 => DRAG_CLIENT_MOVE.load(Ordering::Relaxed) as isize,
+            3 => DRAG_WINDOW_MOVE.load(Ordering::Relaxed) as isize,
+            _ => 0,
+        },
         WM_NCHITTEST if POSITION_LOCKED.load(Ordering::Relaxed) => HTCLIENT,
         WM_NCHITTEST => HTCAPTION,
         WM_CLOSE => {
@@ -1297,7 +1319,7 @@ unsafe fn open_devices_window(owner: Hwnd) {
     NETWORK_COMBO.store(combo, Ordering::Relaxed);
     let mut networks = vec!["Default".to_owned()];
     networks.extend(sysinfo::Networks::new_with_refreshed_list().keys()
-        .filter(|name| !name.contains("Loopback")).cloned());
+        .filter(|name| super::telemetry::is_eligible_adapter(name)).cloned());
     networks.sort();
     networks.dedup();
     let selected_network = networks.iter().position(|name| *name == config.network_adapter)
