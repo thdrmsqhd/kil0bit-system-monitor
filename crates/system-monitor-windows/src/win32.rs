@@ -8,6 +8,9 @@ use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::sync::mpsc::{self, Sender};
+use std::thread::JoinHandle;
+use std::time::Duration;
 use system_monitor_core::{config_store, AiUsageSnapshot, AppConfig, SystemMetrics};
 use zeroize::Zeroize;
 
@@ -27,6 +30,11 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_CLOSE: u32 = 0x0010;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_NCHITTEST: u32 = 0x0084;
+const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+const WM_NCLBUTTONUP: u32 = 0x00A2;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
+const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_RBUTTONUP: u32 = 0x0205;
 const WM_MOVE: u32 = 0x0003;
 const WM_WINDOWPOSCHANGED: u32 = 0x0047;
@@ -37,8 +45,6 @@ const WM_DPICHANGED: u32 = 0x02E0;
 const WM_COMMAND: u32 = 0x0111;
 const WM_APP_REFRESH: u32 = 0x8001;
 const WM_APP_SHOW_SETTINGS: u32 = 0x8002;
-const WM_TIMER: u32 = 0x0113;
-const TELEMETRY_TIMER_ID: usize = 1;
 const GWLP_HWNDPARENT: i32 = -8;
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOZORDER: u32 = 0x0004;
@@ -72,6 +78,11 @@ const SETTINGS_AI_USED: usize = 1008;
 const SETTINGS_AI_INTERVAL: usize = 1009;
 const SETTINGS_PORT_FIRST: usize = 1011;
 const SETTINGS_PORT_LAST: usize = 1022;
+const SETTINGS_DEVICES: usize = 1023;
+const DEVICES_SAVE: usize = 1101;
+const SETTINGS_DEEPSEEK: usize = 1024;
+const DEEPSEEK_SAVE: usize = 1201;
+const DEEPSEEK_REMOVE: usize = 1202;
 const AI_INTERVALS: [u32; 4] = [60, 300, 900, 3600];
 const BM_GETCHECK: u32 = 0x00F0;
 const BM_SETCHECK: u32 = 0x00F1;
@@ -87,6 +98,7 @@ const SW_SHOW: i32 = 5;
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 const ERROR_ALREADY_EXISTS: u32 = 183;
 static POSITION_LOCKED: AtomicBool = AtomicBool::new(false);
+static DRAG_ORIGIN: Mutex<Option<(Point, Point)>> = Mutex::new(None);
 static SNAP_TO_TASKBAR: AtomicBool = AtomicBool::new(true);
 static APPBAR_REGISTERED: AtomicBool = AtomicBool::new(false);
 static FREE_X: AtomicI32 = AtomicI32::new(100);
@@ -97,13 +109,29 @@ static DPI_SCALE_PERCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::Atom
 static CONFIG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 static APP_CONFIG: OnceLock<Mutex<AppConfig>> = OnceLock::new();
 static CURRENT_METRICS: OnceLock<Mutex<SystemMetrics>> = OnceLock::new();
-static TELEMETRY: OnceLock<Mutex<super::telemetry::TelemetryCollector>> = OnceLock::new();
+static TELEMETRY_WORKER: OnceLock<Mutex<Option<TelemetryWorker>>> = OnceLock::new();
 static AI_SNAPSHOT: OnceLock<Mutex<Option<AiUsageSnapshot>>> = OnceLock::new();
 static AI_WORKER: OnceLock<Mutex<Option<super::ai_usage::AiUsageWorker>>> = OnceLock::new();
 static OVERLAY_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static SETTINGS_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
+static DEVICES_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static NETWORK_COMBO: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static DISK_LIST: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static GPU_INDEX_EDIT: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static NETWORK_CHOICES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+static DISK_CHOICES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+static DEEPSEEK_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static DEEPSEEK_KEY_EDIT: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static DEEPSEEK_SNAPSHOT: OnceLock<Mutex<Option<super::ai_usage::DeepSeekBalanceSnapshot>>> = OnceLock::new();
+static DEEPSEEK_WORKER: OnceLock<Mutex<Option<super::ai_usage::DeepSeekWorker>>> = OnceLock::new();
 static AI_KEY_EDIT: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static AI_KEY_STATUS: std::sync::atomic::AtomicPtr<c_void> =
@@ -158,6 +186,7 @@ pub struct WindowClass {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Point {
     x: i32,
     y: i32,
@@ -263,6 +292,8 @@ extern "system" {
     fn CreatePopupMenu() -> *mut c_void;
     fn AppendMenuW(menu: *mut c_void, flags: u32, item_id: usize, text: *const u16) -> i32;
     fn GetCursorPos(point: *mut Point) -> i32;
+    fn SetCapture(hwnd: Hwnd) -> Hwnd;
+    fn ReleaseCapture() -> i32;
     fn TrackPopupMenu(
         menu: *mut c_void,
         flags: u32,
@@ -309,8 +340,6 @@ extern "system" {
     fn GetModuleHandleW(module_name: *const u16) -> Hinstance;
     fn SetProcessDpiAwarenessContext(context: *mut c_void) -> i32;
     fn CreateMutexW(attributes: *mut c_void, initial_owner: i32, name: *const u16) -> *mut c_void;
-    fn SetTimer(hwnd: Hwnd, timer_id: usize, interval_ms: u32, callback: *mut c_void) -> usize;
-    fn KillTimer(hwnd: Hwnd, timer_id: usize) -> i32;
 }
 
 #[link(name = "shell32")]
@@ -344,6 +373,19 @@ extern "system" {
 
 #[derive(Debug)]
 pub struct WinError(&'static str, u32);
+struct TelemetryWorker {
+    stop: Sender<()>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for TelemetryWorker {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 impl fmt::Display for WinError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} (GetLastError={})", self.0, self.1)
@@ -360,11 +402,45 @@ unsafe extern "system" fn window_proc(
     match message {
         WM_NCHITTEST if POSITION_LOCKED.load(Ordering::Relaxed) => HTCLIENT,
         WM_NCHITTEST => HTCAPTION,
+        WM_NCLBUTTONDOWN | WM_LBUTTONDOWN if !POSITION_LOCKED.load(Ordering::Relaxed) => {
+            let mut cursor = Point { x: 0, y: 0 };
+            let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+            if GetCursorPos(&mut cursor) != 0 && GetWindowRect(hwnd, &mut rect) != 0 {
+                if let Ok(mut drag) = DRAG_ORIGIN.lock() {
+                    *drag = Some((cursor, Point { x: rect.left, y: rect.top }));
+                }
+                SetCapture(hwnd);
+            }
+            0
+        }
+        WM_MOUSEMOVE => {
+            if let Ok(drag) = DRAG_ORIGIN.lock() {
+                if let Some((cursor_start, window_start)) = *drag {
+                    let mut cursor = Point { x: 0, y: 0 };
+                    if GetCursorPos(&mut cursor) != 0 {
+                        SetWindowPos(hwnd, null_mut(), window_start.x + cursor.x - cursor_start.x,
+                            window_start.y + cursor.y - cursor_start.y, 0, 0,
+                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    }
+                }
+            }
+            0
+        }
+        WM_NCLBUTTONUP | WM_LBUTTONUP => {
+            if let Ok(mut drag) = DRAG_ORIGIN.lock() {
+                if drag.take().is_some() {
+                    ReleaseCapture();
+                    save_position();
+                }
+            }
+            0
+        }
         WM_CLOSE => {
             DestroyWindow(hwnd);
             0
         }
         WM_APP_REFRESH => {
+            update_fullscreen_visibility(hwnd);
             refresh_overlay(hwnd);
             0
         }
@@ -372,12 +448,12 @@ unsafe extern "system" fn window_proc(
             open_settings_window(hwnd);
             0
         }
-        WM_TIMER if wparam == TELEMETRY_TIMER_ID => {
-            poll_telemetry(hwnd);
-            0
-        }
         WM_DESTROY => {
-            KillTimer(hwnd, TELEMETRY_TIMER_ID);
+            if let Some(worker) = TELEMETRY_WORKER.get()
+                .and_then(|v| v.lock().ok())
+                .and_then(|mut v| v.take()) {
+                drop(worker);
+            }
             if let Some(worker) = AI_WORKER
                 .get()
                 .and_then(|v| v.lock().ok())
@@ -385,6 +461,8 @@ unsafe extern "system" fn window_proc(
             {
                 drop(worker);
             }
+            if let Some(worker) = DEEPSEEK_WORKER.get()
+                .and_then(|v| v.lock().ok()).and_then(|mut v| v.take()) { drop(worker); }
             remove_appbar(hwnd);
             OVERLAY_HANDLE.store(null_mut(), Ordering::Relaxed);
             let settings = SETTINGS_HANDLE.swap(null_mut(), Ordering::Relaxed);
@@ -553,11 +631,23 @@ unsafe extern "system" fn settings_window_proc(
             save_port_options_from_settings(hwnd);
             0
         }
+        WM_COMMAND if (wparam & 0xffff) == SETTINGS_DEVICES => {
+            open_devices_window(hwnd);
+            0
+        }
+        WM_COMMAND if (wparam & 0xffff) == SETTINGS_DEEPSEEK => {
+            open_deepseek_window(hwnd);
+            0
+        }
         WM_CLOSE => {
             DestroyWindow(hwnd);
             0
         }
         WM_DESTROY => {
+            let devices = DEVICES_HANDLE.swap(null_mut(), Ordering::Relaxed);
+            if !devices.is_null() { DestroyWindow(devices); }
+            let deepseek = DEEPSEEK_HANDLE.swap(null_mut(), Ordering::Relaxed);
+            if !deepseek.is_null() { DestroyWindow(deepseek); }
             SETTINGS_HANDLE
                 .compare_exchange(hwnd, null_mut(), Ordering::Relaxed, Ordering::Relaxed)
                 .ok();
@@ -636,6 +726,10 @@ unsafe fn open_settings_window(owner: Hwnd) {
         instance,
         null_mut(),
     );
+    let devices_text: Vec<u16> = "Network, disks and GPU...\0".encode_utf16().collect();
+    CreateWindowExW(0, button_class.as_ptr(), devices_text.as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 280, 24, 240, 36, window,
+        SETTINGS_DEVICES as *mut c_void, instance, null_mut());
     let label_class: Vec<u16> = "STATIC\0".encode_utf16().collect();
     let ai_label: Vec<u16> = "OpenCode Go API key (stored with Windows DPAPI):\0"
         .encode_utf16()
@@ -811,6 +905,8 @@ unsafe fn open_settings_window(owner: Hwnd) {
         .unwrap_or(1);
     SendMessageW(combo, 0x014E, interval_index, 0);
     AI_INTERVAL_COMBO.store(combo, Ordering::Relaxed);
+    devices_child(window, "BUTTON", "DeepSeek balance...", SETTINGS_DEEPSEEK,
+        350, 324, 170, 32, WS_TABSTOP);
     let startup_text: Vec<u16> = "Launch Rust monitor when I sign in\0"
         .encode_utf16()
         .collect();
@@ -921,6 +1017,237 @@ unsafe fn open_settings_window(owner: Hwnd) {
     }
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
+}
+
+unsafe extern "system" fn devices_window_proc(
+    hwnd: Hwnd, message: u32, wparam: usize, lparam: isize,
+) -> Lresult {
+    match message {
+        WM_COMMAND if (wparam & 0xffff) == DEVICES_SAVE => {
+            let combo = NETWORK_COMBO.load(Ordering::Relaxed);
+            let list = DISK_LIST.load(Ordering::Relaxed);
+            let edit = GPU_INDEX_EDIT.load(Ordering::Relaxed);
+            let network_index = SendMessageW(combo, 0x0147, 0, 0).max(0) as usize;
+            let network = NETWORK_CHOICES.get()
+                .and_then(|choices| choices.lock().ok())
+                .and_then(|choices| choices.get(network_index).cloned())
+                .unwrap_or_else(|| "Default".into());
+            let mut disks = Vec::new();
+            if let Some(choices) = DISK_CHOICES.get().and_then(|v| v.lock().ok()) {
+                for (index, name) in choices.iter().enumerate() {
+                    if SendMessageW(list, 0x0187, index, 0) > 0 {
+                        disks.push(name.clone());
+                    }
+                }
+            }
+            let mut text = [0_u16; 12];
+            let length = GetWindowTextW(edit, text.as_mut_ptr(), text.len() as i32).max(0) as usize;
+            let gpu_index = String::from_utf16_lossy(&text[..length]).trim().parse::<u32>()
+                .unwrap_or(0).min(15);
+            if let Ok(mut config) = config_lock().lock() {
+                config.network_adapter = network;
+                config.selected_disks = if disks.is_empty() { "None".into() }
+                    else { disks.join(";") };
+                config.gpu_index = gpu_index;
+                let _ = config_store::save(&config_path(), &config);
+            }
+            let overlay = OVERLAY_HANDLE.load(Ordering::Relaxed);
+            if !overlay.is_null() { PostMessageW(overlay, WM_APP_REFRESH, 0, 0); }
+            DestroyWindow(hwnd);
+            0
+        }
+        WM_CLOSE => { DestroyWindow(hwnd); 0 }
+        WM_DESTROY => {
+            DEVICES_HANDLE.store(null_mut(), Ordering::Relaxed);
+            NETWORK_COMBO.store(null_mut(), Ordering::Relaxed);
+            DISK_LIST.store(null_mut(), Ordering::Relaxed);
+            GPU_INDEX_EDIT.store(null_mut(), Ordering::Relaxed);
+            0
+        }
+        _ => DefWindowProcW(hwnd, message, wparam, lparam),
+    }
+}
+
+unsafe fn devices_child(parent: Hwnd, class: &str, caption: &str, id: usize,
+    x: i32, y: i32, width: i32, height: i32, style: u32) -> Hwnd {
+    let class: Vec<u16> = class.encode_utf16().chain(Some(0)).collect();
+    let caption: Vec<u16> = caption.encode_utf16().chain(Some(0)).collect();
+    CreateWindowExW(0, class.as_ptr(), caption.as_ptr(), WS_CHILD | WS_VISIBLE | style,
+        x, y, width, height, parent, id as *mut c_void, GetModuleHandleW(null()), null_mut())
+}
+
+unsafe fn open_devices_window(owner: Hwnd) {
+    let existing = DEVICES_HANDLE.load(Ordering::Relaxed);
+    if !existing.is_null() { ShowWindow(existing, SW_SHOW); return; }
+    let class_name: Vec<u16> = "Kil0bitRustDevices\0".encode_utf16().collect();
+    let title: Vec<u16> = "Monitoring devices\0".encode_utf16().collect();
+    let instance = GetModuleHandleW(null());
+    let class = WindowClass {
+        style: 0, window_proc: Some(devices_window_proc), class_extra: 0,
+        window_extra: 0, instance, icon: null_mut(), cursor: null_mut(),
+        background: null_mut(), menu_name: null(), class_name: class_name.as_ptr(),
+    };
+    if RegisterClassW(&class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS { return; }
+    let window = CreateWindowExW(WS_EX_TOOLWINDOW, class_name.as_ptr(), title.as_ptr(),
+        WS_OVERLAPPEDWINDOW, 360, 160, 520, 470, owner, null_mut(), instance, null_mut());
+    if window.is_null() { return; }
+    DEVICES_HANDLE.store(window, Ordering::Relaxed);
+    let config = config_lock().lock().map(|c| c.clone()).unwrap_or_default();
+    devices_child(window, "STATIC", "Network adapter", 0, 20, 20, 470, 24, 0);
+    let combo = devices_child(window, "COMBOBOX", "", 0, 20, 50, 465, 180,
+        WS_VSCROLL | WS_TABSTOP | 0x0003);
+    NETWORK_COMBO.store(combo, Ordering::Relaxed);
+    let mut networks = vec!["Default".to_owned()];
+    networks.extend(sysinfo::Networks::new_with_refreshed_list().iter()
+        .map(|(name, _)| name.clone()).filter(|name| !name.contains("Loopback")));
+    networks.sort();
+    networks.dedup();
+    let selected_network = networks.iter().position(|name| *name == config.network_adapter)
+        .unwrap_or_else(|| networks.iter().position(|name| name == "Default").unwrap_or(0));
+    for name in &networks {
+        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        SendMessageW(combo, 0x0143, 0, wide.as_ptr() as isize);
+    }
+    SendMessageW(combo, 0x014E, selected_network, 0);
+    *NETWORK_CHOICES.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap() = networks;
+
+    devices_child(window, "STATIC", "Disk volumes (Ctrl/Shift to select multiple)",
+        0, 20, 95, 470, 24, 0);
+    let list = devices_child(window, "LISTBOX", "", 0, 20, 125, 465, 140,
+        WS_BORDER | WS_VSCROLL | WS_TABSTOP | 0x0008);
+    DISK_LIST.store(list, Ordering::Relaxed);
+    let mut disks: Vec<String> = sysinfo::Disks::new_with_refreshed_list().iter()
+        .map(|disk| disk.mount_point().to_string_lossy().into_owned()).collect();
+    disks.sort();
+    disks.dedup();
+    for (index, name) in disks.iter().enumerate() {
+        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        SendMessageW(list, 0x0180, 0, wide.as_ptr() as isize);
+        let selected = config.selected_disks == "All"
+            || (config.selected_disks == "Default" && index == 0)
+            || config.selected_disks.split(';').any(|item| item == name);
+        if selected { SendMessageW(list, 0x0185, 1, index as isize); }
+    }
+    *DISK_CHOICES.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap() = disks;
+    devices_child(window, "STATIC", "NVIDIA GPU index (0 = first device)",
+        0, 20, 285, 320, 24, 0);
+    let edit = devices_child(window, "EDIT", &config.gpu_index.to_string(), 0,
+        345, 283, 95, 28, WS_BORDER | WS_TABSTOP);
+    GPU_INDEX_EDIT.store(edit, Ordering::Relaxed);
+    devices_child(window, "BUTTON", "Save selection", DEVICES_SAVE,
+        20, 350, 175, 36, WS_TABSTOP);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+}
+
+unsafe extern "system" fn deepseek_window_proc(
+    hwnd: Hwnd, message: u32, wparam: usize, lparam: isize,
+) -> Lresult {
+    match message {
+        WM_COMMAND if (wparam & 0xffff) == DEEPSEEK_SAVE => {
+            let edit = DEEPSEEK_KEY_EDIT.load(Ordering::Relaxed);
+            let length = GetWindowTextLengthW(edit).clamp(0, 4096) as usize;
+            let mut buffer = vec![0_u16; length + 1];
+            let actual = GetWindowTextW(edit, buffer.as_mut_ptr(), buffer.len() as i32).max(0) as usize;
+            let mut key = String::from_utf16_lossy(&buffer[..actual]);
+            if !key.trim().is_empty() {
+                let result = crate::secret_store::SecretStore::deepseek()
+                    .and_then(|store| store.save(&key));
+                if result.is_ok() {
+                    if let Ok(mut config) = config_lock().lock() {
+                        config.deepseek_enabled = true;
+                        let _ = config_store::save(&config_path(), &config);
+                    }
+                    restart_deepseek_worker(OVERLAY_HANDLE.load(Ordering::Relaxed));
+                }
+            }
+            key.zeroize();
+            buffer.zeroize();
+            let blank = [0_u16];
+            SetWindowTextW(edit, blank.as_ptr());
+            DestroyWindow(hwnd);
+            0
+        }
+        WM_COMMAND if (wparam & 0xffff) == DEEPSEEK_REMOVE => {
+            let _ = crate::secret_store::SecretStore::deepseek().and_then(|store| store.remove());
+            if let Ok(mut config) = config_lock().lock() {
+                config.deepseek_enabled = false;
+                let _ = config_store::save(&config_path(), &config);
+            }
+            if let Some(worker) = DEEPSEEK_WORKER.get()
+                .and_then(|v| v.lock().ok()).and_then(|mut v| v.take()) { drop(worker); }
+            if let Some(snapshot) = DEEPSEEK_SNAPSHOT.get() {
+                if let Ok(mut value) = snapshot.lock() { *value = None; }
+            }
+            let overlay = OVERLAY_HANDLE.load(Ordering::Relaxed);
+            if !overlay.is_null() { PostMessageW(overlay, WM_APP_REFRESH, 0, 0); }
+            DestroyWindow(hwnd);
+            0
+        }
+        WM_CLOSE => { DestroyWindow(hwnd); 0 }
+        WM_DESTROY => {
+            DEEPSEEK_HANDLE.store(null_mut(), Ordering::Relaxed);
+            DEEPSEEK_KEY_EDIT.store(null_mut(), Ordering::Relaxed);
+            0
+        }
+        _ => DefWindowProcW(hwnd, message, wparam, lparam),
+    }
+}
+
+unsafe fn open_deepseek_window(owner: Hwnd) {
+    let existing = DEEPSEEK_HANDLE.load(Ordering::Relaxed);
+    if !existing.is_null() { ShowWindow(existing, SW_SHOW); return; }
+    let class_name: Vec<u16> = "Kil0bitRustDeepSeek\0".encode_utf16().collect();
+    let title: Vec<u16> = "DeepSeek balance\0".encode_utf16().collect();
+    let instance = GetModuleHandleW(null());
+    let class = WindowClass {
+        style: 0, window_proc: Some(deepseek_window_proc), class_extra: 0,
+        window_extra: 0, instance, icon: null_mut(), cursor: null_mut(),
+        background: null_mut(), menu_name: null(), class_name: class_name.as_ptr(),
+    };
+    if RegisterClassW(&class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS { return; }
+    let window = CreateWindowExW(WS_EX_TOOLWINDOW, class_name.as_ptr(), title.as_ptr(),
+        WS_OVERLAPPEDWINDOW, 420, 230, 460, 235, owner, null_mut(), instance, null_mut());
+    if window.is_null() { return; }
+    DEEPSEEK_HANDLE.store(window, Ordering::Relaxed);
+    let status = if crate::secret_store::SecretStore::deepseek().is_ok_and(|s| s.exists()) {
+        "API key saved for this Windows user" } else { "Enter a DeepSeek API key" };
+    devices_child(window, "STATIC", status, 0, 20, 20, 410, 25, 0);
+    let edit = devices_child(window, "EDIT", "", 0, 20, 55, 410, 28,
+        WS_BORDER | WS_TABSTOP | ES_PASSWORD);
+    DEEPSEEK_KEY_EDIT.store(edit, Ordering::Relaxed);
+    devices_child(window, "BUTTON", "Save key", DEEPSEEK_SAVE,
+        20, 105, 150, 34, WS_TABSTOP);
+    devices_child(window, "BUTTON", "Remove key", DEEPSEEK_REMOVE,
+        190, 105, 150, 34, WS_TABSTOP);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+}
+
+fn start_deepseek_worker(hwnd: Hwnd) {
+    let config = config_lock().lock().map(|c| c.clone()).unwrap_or_default();
+    if hwnd.is_null() || !config.deepseek_enabled { return; }
+    let Ok(store) = crate::secret_store::SecretStore::deepseek() else { return; };
+    if !store.exists() { return; }
+    let handle = hwnd as usize;
+    let worker = super::ai_usage::DeepSeekWorker::start(
+        config.ai_poll_interval_seconds, store, move |event| {
+            if let Ok(snapshot) = event {
+                if let Some(state) = DEEPSEEK_SNAPSHOT.get() {
+                    if let Ok(mut current) = state.lock() { *current = Some(snapshot); }
+                }
+                unsafe { PostMessageW(handle as Hwnd, WM_APP_REFRESH, 0, 0); }
+            }
+        });
+    if let Some(slot) = DEEPSEEK_WORKER.get() {
+        if let Ok(mut slot) = slot.lock() { *slot = Some(worker); }
+    }
+}
+
+fn restart_deepseek_worker(hwnd: Hwnd) {
+    if let Some(worker) = DEEPSEEK_WORKER.get()
+        .and_then(|v| v.lock().ok()).and_then(|mut v| v.take()) { drop(worker); }
+    start_deepseek_worker(hwnd);
 }
 
 unsafe fn save_opencode_key_from_settings() {
@@ -1403,8 +1730,8 @@ pub fn run(_pixels: &[u8], _width: i32, _height: i32) -> Result<(), WinError> {
     unsafe {
         load_config();
         let mut telemetry = super::telemetry::TelemetryCollector::new();
-        let first_sample = telemetry.sample();
-        let _ = TELEMETRY.set(Mutex::new(telemetry));
+        let initial_config = config_lock().lock().map(|c| c.clone()).unwrap_or_default();
+        let first_sample = telemetry.sample(&initial_config);
         let _ = CURRENT_METRICS.set(Mutex::new(first_sample));
         let (initial_pixels, initial_width, initial_height) = render_current_bitmap();
         // Per-monitor notifications are required before creating the overlay HWND.
@@ -1459,6 +1786,8 @@ pub fn run(_pixels: &[u8], _width: i32, _height: i32) -> Result<(), WinError> {
         OVERLAY_HANDLE.store(hwnd, Ordering::Relaxed);
         let _ = AI_SNAPSHOT.set(Mutex::new(None));
         let _ = AI_WORKER.set(Mutex::new(None));
+        let _ = DEEPSEEK_SNAPSHOT.set(Mutex::new(None));
+        let _ = DEEPSEEK_WORKER.set(Mutex::new(None));
         ALTERNATE_ACCENT.store(false, Ordering::Relaxed);
         DPI_SCALE_PERCENT.store(100, Ordering::Relaxed);
         let surface_result = present_bitmap(hwnd, &initial_pixels, initial_width, initial_height);
@@ -1476,15 +1805,8 @@ pub fn run(_pixels: &[u8], _width: i32, _height: i32) -> Result<(), WinError> {
             ShowWindow(hwnd, 0);
         }
         start_ai_worker(hwnd);
-        let interval = config_lock()
-            .lock()
-            .map(|c| c.update_interval_ms)
-            .unwrap_or(1000);
-        if SetTimer(hwnd, TELEMETRY_TIMER_ID, interval, null_mut()) == 0 {
-            DestroyWindow(hwnd);
-            UnregisterClassW(class_name.as_ptr(), instance);
-            return Err(last_error("SetTimer"));
-        }
+        start_deepseek_worker(hwnd);
+        start_telemetry_worker(hwnd, telemetry);
         if !std::env::args().any(|arg| arg == "--startup") {
             open_settings_window(hwnd);
         }
@@ -1702,34 +2024,36 @@ fn render_current_bitmap() -> (Vec<u8>, i32, i32) {
             .and_then(|v| v.lock().ok())
             .and_then(|v| v.clone())
             .as_ref(),
+        DEEPSEEK_SNAPSHOT.get().and_then(|v| v.lock().ok())
+            .and_then(|v| v.clone()).as_ref(),
         ALTERNATE_ACCENT.load(Ordering::Relaxed),
     );
     super::bitmap::scale_surface(
         &base,
         width,
         height,
-        DPI_SCALE_PERCENT.load(Ordering::Relaxed),
+        (DPI_SCALE_PERCENT.load(Ordering::Relaxed) as f64 * config.scale_factor)
+            .round().clamp(25.0, 400.0) as u32,
     )
 }
 
-fn poll_telemetry(hwnd: Hwnd) {
-    let Some(collector) = TELEMETRY.get() else {
-        return;
-    };
-    let Ok(mut collector) = collector.lock() else {
-        return;
-    };
-    let sample = collector.sample();
-    if let Some(state) = CURRENT_METRICS.get() {
-        if let Ok(mut current) = state.lock() {
-            *current = sample;
+fn start_telemetry_worker(hwnd: Hwnd, mut collector: super::telemetry::TelemetryCollector) {
+    let (stop, stopped) = mpsc::channel();
+    let handle = hwnd as usize;
+    let thread = std::thread::spawn(move || loop {
+        let config = config_lock().lock().map(|c| c.clone()).unwrap_or_default();
+        if stopped.recv_timeout(Duration::from_millis(config.update_interval_ms as u64)).is_ok() {
+            break;
         }
-    }
-    drop(collector);
-    unsafe {
-        update_fullscreen_visibility(hwnd);
-        refresh_overlay(hwnd);
-    }
+        let sample = collector.sample(&config);
+        if let Some(state) = CURRENT_METRICS.get() {
+            if let Ok(mut current) = state.lock() {
+                *current = sample;
+            }
+        }
+        unsafe { PostMessageW(handle as Hwnd, WM_APP_REFRESH, 0, 0); }
+    });
+    let _ = TELEMETRY_WORKER.set(Mutex::new(Some(TelemetryWorker { stop, thread: Some(thread) })));
 }
 
 unsafe fn refresh_overlay(hwnd: Hwnd) {

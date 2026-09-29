@@ -12,6 +12,14 @@ pub struct SecretStore {
 
 impl SecretStore {
     pub fn opencode() -> io::Result<Self> {
+        Self::named("opencode")
+    }
+
+    pub fn deepseek() -> io::Result<Self> {
+        Self::named("deepseek")
+    }
+
+    fn named(provider: &str) -> io::Result<Self> {
         let local = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "LOCALAPPDATA is unavailable")
         })?;
@@ -19,7 +27,7 @@ impl SecretStore {
             path: PathBuf::from(local)
                 .join("Kil0bitSystemMonitorRust")
                 .join("secrets")
-                .join("opencode.dpapi"),
+                .join(format!("{provider}.dpapi")),
         })
     }
 

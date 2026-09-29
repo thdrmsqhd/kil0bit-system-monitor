@@ -9,15 +9,17 @@ pub fn build_metrics_bitmap(
     metrics: &system_monitor_core::SystemMetrics,
     config: &system_monitor_core::AppConfig,
     ai: Option<&system_monitor_core::AiUsageSnapshot>,
+    deepseek: Option<&super::ai_usage::DeepSeekBalanceSnapshot>,
     alternate_accent: bool,
 ) -> (Vec<u8>, i32, i32) {
     let compact = config.display_style == "Compact";
     let mut fields = Vec::new();
+    let global_color = parse_hex_bgr(&config.accent_color_hex).unwrap_or([242, 242, 242]);
     let mut add = |enabled: bool, full: &str, short: &str, value: String| {
         if enabled {
             fields.push((
                 format!("{} {value}", if compact { short } else { full }),
-                [242, 242, 242],
+                global_color,
             ));
         }
     };
@@ -37,7 +39,11 @@ pub fn build_metrics_bitmap(
         config.show_gpu,
         "GPU",
         "G",
-        format!("{}%", metrics.gpu_usage_percent.clamp(0.0, 100.0) as u32),
+        if metrics.gpu_usage_available {
+            format!("{}%", metrics.gpu_usage_percent.clamp(0.0, 100.0) as u32)
+        } else {
+            "NA".into()
+        },
     );
     add(
         config.show_temp,
@@ -61,6 +67,16 @@ pub fn build_metrics_bitmap(
         "K",
         format!("{}%", metrics.disk_used_percent.clamp(0.0, 100.0) as u32),
     );
+    add(config.show_disk_speed, "ACT", "A",
+        if metrics.disk_activity_available {
+            format!("{}%", metrics.disk_usage_percent.clamp(0.0, 100.0) as u32)
+        } else { "NA".into() });
+    if config.show_disk {
+        for disk in &metrics.disks {
+            let name = disk.name.trim_end_matches(['\\', '/']);
+            fields.push((format!("{name} {}%", disk.space_percent as u32), global_color));
+        }
+    }
     if config.opencode_enabled || config.codex_enabled {
         if let Some(snapshot) = ai {
             let mut add_window =
@@ -95,24 +111,37 @@ pub fn build_metrics_bitmap(
             add_window(config.opencode_show_monthly, "M", snapshot.monthly.as_ref());
         }
     }
+    if config.deepseek_enabled {
+        if let Some(balance) = deepseek {
+            for entry in &balance.balances {
+                fields.push((format!("DS {} {:.2}", entry.currency, entry.total), [30, 200, 80]));
+            }
+        }
+    }
     let mut glyphs = Vec::new();
     for (index, (field, color)) in fields.iter().enumerate() {
         if index > 0 {
-            glyphs.extend([(' ', [242, 242, 242]), (' ', [242, 242, 242])]);
+            for _ in 0..(2 + config.column_spacing / 3) {
+                glyphs.push((' ', global_color));
+            }
         }
         glyphs.extend(field.chars().map(|ch| (ch, *color)));
     }
     let char_count = glyphs.len() as i32;
-    let width = (32 + char_count * 12).clamp(52, 1200);
+    let width = (32 + char_count * 12).max(52);
     let height = HEIGHT;
     let mut pixels = vec![0; width as usize * height as usize * BYTES_PER_PIXEL];
-    let alpha = 230;
+    let alpha = if config.show_background || config.show_pods { 230 } else { 0 };
     let capsule = if alternate_accent {
         [28u8, 78, 30]
     } else {
-        [38u8, 31, 24]
+        parse_hex_bgr(if config.show_background {
+            &config.background_color_hex
+        } else {
+            &config.pod_color_hex
+        }).unwrap_or([38u8, 31, 24])
     };
-    let radius = 13;
+    let radius = if config.show_pods { 13 } else { 0 };
     for y in 0..height {
         for x in 0..width {
             let cx = x.clamp(radius, width - radius - 1);
@@ -150,6 +179,16 @@ pub fn build_metrics_bitmap(
         }
     }
     (pixels, width, height)
+}
+
+fn parse_hex_bgr(input: &str) -> Option<[u8; 3]> {
+    let hex = input.trim_start_matches('#');
+    let rgb = if hex.len() == 8 { &hex[2..] } else { hex };
+    if rgb.len() != 6 { return None; }
+    let red = u8::from_str_radix(&rgb[0..2], 16).ok()?;
+    let green = u8::from_str_radix(&rgb[2..4], 16).ok()?;
+    let blue = u8::from_str_radix(&rgb[4..6], 16).ok()?;
+    Some([blue, green, red])
 }
 
 fn put_pixel_sized(pixels: &mut [u8], width: i32, x: i32, y: i32, bgr: [u8; 3], alpha: u8) {
@@ -369,7 +408,7 @@ mod tests {
             show_net_down: false,
             ..system_monitor_core::AppConfig::default()
         };
-        let (pixels, width, height) = build_metrics_bitmap(&metrics, &config, None, false);
+        let (pixels, width, height) = build_metrics_bitmap(&metrics, &config, None, None, false);
         assert_eq!(height, HEIGHT);
         assert!(width > 52);
         assert!(pixels.as_chunks::<4>().0.contains(&[242, 242, 242, 255]));
@@ -384,7 +423,7 @@ mod tests {
             show_net_down: false,
             ..system_monitor_core::AppConfig::default()
         };
-        let (_, empty_width, _) = build_metrics_bitmap(&metrics, &empty, None, false);
+        let (_, empty_width, _) = build_metrics_bitmap(&metrics, &empty, None, None, false);
         assert_eq!(empty_width, 52);
     }
 }

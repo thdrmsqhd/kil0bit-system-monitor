@@ -45,6 +45,7 @@ pub struct AppConfig {
     pub always_on_top: bool,
     pub opencode_enabled: bool,
     pub codex_enabled: bool,
+    pub deepseek_enabled: bool,
     pub opencode_show_rolling: bool,
     pub opencode_show_weekly: bool,
     pub opencode_show_monthly: bool,
@@ -78,7 +79,7 @@ impl Default for AppConfig {
             show_net_down: true,
             network_adapter: "Default".into(),
             gpu_adapter: "Default".into(),
-            selected_disks: "All".into(),
+            selected_disks: "Default".into(),
             display_style: "Text".into(),
             font_family: "Segoe UI".into(),
             accent_color_hex: "#FFFFFF".into(),
@@ -100,6 +101,7 @@ impl Default for AppConfig {
             always_on_top: true,
             opencode_enabled: false,
             codex_enabled: false,
+            deepseek_enabled: false,
             opencode_show_rolling: true,
             opencode_show_weekly: true,
             opencode_show_monthly: true,
@@ -375,6 +377,7 @@ pub struct SystemMetrics {
     pub cpu_usage_percent: f32,
     pub ram_percent: f32,
     pub gpu_usage_percent: f32,
+    pub gpu_usage_available: bool,
     /// `None` means the selected device/API has no temperature reading.
     pub gpu_temperature_c: Option<f32>,
     pub net_up_kbps: f32,
@@ -383,6 +386,7 @@ pub struct SystemMetrics {
     pub net_down_text: String,
     /// Maximum activity among selected physical disk instances.
     pub disk_usage_percent: f32,
+    pub disk_activity_available: bool,
     /// Capacity-weighted used-space percent across ready selected drives.
     pub disk_used_percent: f32,
     pub disks: Vec<DiskMetric>,

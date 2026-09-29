@@ -1,5 +1,6 @@
 //! Non-blocking-friendly telemetry sampling primitives backed by sysinfo.
-//! GPU readings remain explicitly unavailable until vendor providers are added.
+//! Snapshot collection keeps counter state per adapter so switching selection does not
+//! turn an unrelated adapter's lifetime byte count into a transfer-rate spike.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -12,8 +13,10 @@ pub struct TelemetryCollector {
     system: System,
     networks: Networks,
     disks: Disks,
-    previous_network_totals: Option<(u64, u64, Instant)>,
+    previous_network_totals: HashMap<String, (u64, u64, Instant)>,
     adapter_totals: HashMap<String, (u64, u64)>,
+    disk_counters: Option<super::pdh::CounterGroup>,
+    gpu_counters: Option<super::pdh::CounterGroup>,
 }
 
 impl TelemetryCollector {
@@ -27,21 +30,23 @@ impl TelemetryCollector {
             system,
             networks,
             disks,
-            previous_network_totals: None,
+            previous_network_totals: HashMap::new(),
             adapter_totals: HashMap::new(),
+            disk_counters: super::pdh::CounterGroup::new("\\PhysicalDisk(*)\\% Disk Time"),
+            gpu_counters: super::pdh::CounterGroup::new("\\GPU Engine(*)\\Utilization Percentage"),
         }
     }
 
     /// Poll one immutable metrics sample. A first network sample has zero rate because there is
     /// no previous counter value to subtract.
-    pub fn sample(&mut self) -> SystemMetrics {
+    pub fn sample(&mut self, config: &system_monitor_core::AppConfig) -> SystemMetrics {
         let now = Instant::now();
         self.system.refresh_cpu_usage();
         self.system.refresh_memory();
         self.networks.refresh(true);
         self.disks.refresh(true);
-        let mut received = 0_u64;
-        let mut transmitted = 0_u64;
+        let mut up = 0.0;
+        let mut down = 0.0;
         self.adapter_totals.clear();
         for (name, network) in &self.networks {
             if !is_eligible_adapter(name) {
@@ -49,21 +54,19 @@ impl TelemetryCollector {
             }
             let rx = network.total_received();
             let tx = network.total_transmitted();
-            received = received.saturating_add(rx);
-            transmitted = transmitted.saturating_add(tx);
+            if config.network_adapter == "Default" || config.network_adapter == name.as_str() {
+                if let Some((old_rx, old_tx, previous)) = self.previous_network_totals.get(name) {
+                    let elapsed = now.duration_since(*previous).as_secs_f32();
+                    down += bytes_per_second_to_kib(rx.saturating_sub(*old_rx), elapsed);
+                    up += bytes_per_second_to_kib(tx.saturating_sub(*old_tx), elapsed);
+                }
+            }
             self.adapter_totals.insert(name.clone(), (rx, tx));
+            self.previous_network_totals
+                .insert(name.clone(), (rx, tx, now));
         }
-        let (up, down) = self
-            .previous_network_totals
-            .map(|(old_rx, old_tx, previous)| {
-                let elapsed = now.duration_since(previous).as_secs_f32();
-                (
-                    bytes_per_second_to_kib(transmitted.saturating_sub(old_tx), elapsed),
-                    bytes_per_second_to_kib(received.saturating_sub(old_rx), elapsed),
-                )
-            })
-            .unwrap_or((0.0, 0.0));
-        self.previous_network_totals = Some((received, transmitted, now));
+        self.previous_network_totals
+            .retain(|name, _| self.adapter_totals.contains_key(name));
         let total_memory = self.system.total_memory();
         let used_memory = total_memory.saturating_sub(self.system.available_memory());
         let ram_percent = if total_memory == 0 {
@@ -71,26 +74,43 @@ impl TelemetryCollector {
         } else {
             used_memory as f32 / total_memory as f32 * 100.0
         };
+        let first_disk = self.disks.iter().map(|disk| disk.mount_point().to_string_lossy().into_owned()).min();
+        let selected = |name: &str| {
+            (config.selected_disks == "Default" && first_disk.as_deref() == Some(name))
+                || config.selected_disks == "All"
+                || (config.selected_disks != "None"
+                    && config.selected_disks.split(';').any(|item| item.trim() == name))
+        };
+        let disk_activity = self.disk_counters.as_ref().map(|group| group.sample()).unwrap_or_default();
         let disk_metrics: Vec<DiskMetric> = self
             .disks
             .iter()
             .filter_map(|disk| {
+                let name = disk.mount_point().to_string_lossy().into_owned();
+                if !selected(&name) {
+                    return None;
+                }
                 let total = disk.total_space();
                 if total == 0 {
                     return None;
                 }
                 let used = total.saturating_sub(disk.available_space());
+                let drive = name.trim_end_matches('\\');
+                let activity_percent = disk_activity.iter()
+                    .filter(|(instance, _)| instance.contains(drive))
+                    .map(|(_, usage)| *usage).fold(0.0, f32::max);
                 Some(DiskMetric {
-                    name: disk.mount_point().to_string_lossy().into_owned(),
+                    name,
                     space_percent: used as f32 / total as f32 * 100.0,
-                    activity_percent: 0.0,
+                    activity_percent,
                 })
             })
             .collect();
-        let total_space: u128 = self.disks.iter().map(|d| d.total_space() as u128).sum();
+        let total_space: u128 = self.disks.iter().filter(|d| selected(&d.mount_point().to_string_lossy())).map(|d| d.total_space() as u128).sum();
         let used_space: u128 = self
             .disks
             .iter()
+            .filter(|d| selected(&d.mount_point().to_string_lossy()))
             .map(|d| d.total_space().saturating_sub(d.available_space()) as u128)
             .sum();
         let disk_used_percent = if total_space == 0 {
@@ -98,6 +118,21 @@ impl TelemetryCollector {
         } else {
             used_space as f32 / total_space as f32 * 100.0
         };
+        let gpu = if config.show_gpu || config.show_temp {
+            super::gpu::sample_nvidia(config.gpu_index as usize)
+        } else {
+            None
+        };
+        let fallback_gpu = if gpu.is_none() && config.show_gpu {
+            self.gpu_counters.as_ref().and_then(|group| {
+                let identifier = format!("phys_{}", config.gpu_index);
+                group.sample().into_iter()
+                    .filter(|(name, _)| name.contains(&identifier))
+                    .map(|(_, usage)| usage).reduce(f32::max)
+            })
+        } else { None };
+        let disk_usage_percent = disk_metrics.iter()
+            .map(|disk| disk.activity_percent).fold(0.0, f32::max);
         SystemMetrics {
             cpu_usage_percent: self.system.global_cpu_usage().clamp(0.0, 100.0),
             ram_percent: ram_percent.clamp(0.0, 100.0),
@@ -106,8 +141,13 @@ impl TelemetryCollector {
             net_up_text: format_network_rate(up),
             net_down_text: format_network_rate(down),
             disk_used_percent: disk_used_percent.clamp(0.0, 100.0),
+            disk_usage_percent,
+            disk_activity_available: !disk_activity.is_empty(),
             disks: disk_metrics,
-            gpu_temperature_c: None,
+            gpu_usage_percent: gpu.as_ref().map(|v| v.usage_percent)
+                .or(fallback_gpu).unwrap_or(0.0),
+            gpu_usage_available: gpu.is_some() || fallback_gpu.is_some(),
+            gpu_temperature_c: gpu.and_then(|v| v.temperature_c),
             ..SystemMetrics::default()
         }
     }

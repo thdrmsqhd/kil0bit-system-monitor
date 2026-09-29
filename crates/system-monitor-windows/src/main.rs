@@ -2,6 +2,8 @@
 #![cfg_attr(all(not(windows), feature = "win32-api-check"), allow(dead_code))]
 
 pub mod ai_usage;
+mod gpu;
+mod pdh;
 mod bitmap;
 pub mod secret_store;
 pub mod telemetry;
@@ -26,10 +28,11 @@ fn main() {
     let _demo = bitmap::build_demo_bitmap(false);
     let _scaled_demo = bitmap::scale_bitmap(&_demo, 100);
     let mut telemetry = telemetry::TelemetryCollector::new();
-    let sample = telemetry.sample();
+    let sample = telemetry.sample(&system_monitor_core::AppConfig::default());
     let (live, width, height) = bitmap::build_metrics_bitmap(
         &sample,
         &system_monitor_core::AppConfig::default(),
+        None,
         None,
         false,
     );

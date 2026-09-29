@@ -51,6 +51,38 @@ pub struct AiUsageWorker {
     thread: Option<JoinHandle<()>>,
 }
 
+/// Independent balance poller; an API outage cannot delay quota refresh.
+pub struct DeepSeekWorker {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl DeepSeekWorker {
+    pub fn start(interval_seconds: u32, store: crate::secret_store::SecretStore,
+        on_event: impl Fn(Result<DeepSeekBalanceSnapshot, ProviderError>) + Send + 'static,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            while !stopped.load(Ordering::Acquire) {
+                let result = store.load().map_err(|_| ProviderError::MissingKey)
+                    .and_then(|key| fetch_deepseek_balance(&key));
+                if stopped.load(Ordering::Acquire) { break; }
+                on_event(result);
+                thread::park_timeout(Duration::from_secs(interval_seconds.clamp(60, 3600) as u64));
+            }
+        });
+        Self { stop, thread: Some(thread) }
+    }
+}
+
+impl Drop for DeepSeekWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() { thread.thread().unpark(); }
+    }
+}
+
 impl AiUsageWorker {
     pub fn start(
         interval_seconds: u32,
