@@ -151,8 +151,15 @@ impl TelemetryCollector {
             used_space as f32 / total_space as f32 * 100.0
         };
         let gpu = if config.show_gpu || config.show_temp {
-            super::gpu::sample_nvidia(config.gpu_index as usize)
-                .or_else(|| super::gpu::sample_amd(config.gpu_index as usize))
+            let vendor = config.gpu_adapter.to_ascii_lowercase();
+            if vendor.contains("amd") {
+                super::gpu::sample_amd(config.gpu_index as usize)
+            } else if vendor.contains("nvidia") {
+                super::gpu::sample_nvidia(config.gpu_index as usize)
+            } else {
+                super::gpu::sample_nvidia(config.gpu_index as usize)
+                    .or_else(|| super::gpu::sample_amd(config.gpu_index as usize))
+            }
         } else {
             None
         };

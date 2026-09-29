@@ -140,6 +140,9 @@ static DISK_LIST: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static GPU_INDEX_EDIT: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
+static GPU_VENDOR_COMBO: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static GPU_VENDOR_CHOICES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static UPDATE_COMBO: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static DEVICE_CHECKS: [std::sync::atomic::AtomicPtr<c_void>; 2] = [
@@ -1250,6 +1253,12 @@ unsafe extern "system" fn devices_window_proc(
             let combo = NETWORK_COMBO.load(Ordering::Relaxed);
             let list = DISK_LIST.load(Ordering::Relaxed);
             let edit = GPU_INDEX_EDIT.load(Ordering::Relaxed);
+            let gpu_vendor_index = SendMessageW(GPU_VENDOR_COMBO.load(Ordering::Relaxed),
+                0x0147, 0, 0).max(0) as usize;
+            let gpu_vendor = GPU_VENDOR_CHOICES.get()
+                .and_then(|choices| choices.lock().ok())
+                .and_then(|choices| choices.get(gpu_vendor_index).cloned())
+                .unwrap_or_else(|| "Default".into());
             let network_index = SendMessageW(combo, 0x0147, 0, 0).max(0) as usize;
             let network = NETWORK_CHOICES.get()
                 .and_then(|choices| choices.lock().ok())
@@ -1279,6 +1288,7 @@ unsafe extern "system" fn devices_window_proc(
                 config.selected_disks = if disks.is_empty() { "None".into() }
                     else { disks.join(";") };
                 config.gpu_index = gpu_index;
+                config.gpu_adapter = gpu_vendor;
                 config.update_interval_ms = update_interval;
                 config.hide_on_fullscreen = checked(0);
                 config.show_disk_speed = checked(1);
@@ -1301,6 +1311,7 @@ unsafe extern "system" fn devices_window_proc(
             NETWORK_COMBO.store(null_mut(), Ordering::Relaxed);
             DISK_LIST.store(null_mut(), Ordering::Relaxed);
             GPU_INDEX_EDIT.store(null_mut(), Ordering::Relaxed);
+            GPU_VENDOR_COMBO.store(null_mut(), Ordering::Relaxed);
             UPDATE_COMBO.store(null_mut(), Ordering::Relaxed);
             for control in &DEVICE_CHECKS { control.store(null_mut(), Ordering::Relaxed); }
             0
@@ -1371,10 +1382,22 @@ unsafe fn open_devices_window(owner: Hwnd) {
         if selected { SendMessageW(list, 0x0185, 1, index as isize); }
     }
     *DISK_CHOICES.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap() = disks;
-    devices_child(window, "STATIC", "NVIDIA GPU index (0 = first device)",
-        0, 20, 285, 320, 24, 0);
+    devices_child(window, "STATIC", "GPU source", 0, 20, 285, 95, 24, 0);
+    let gpu_vendor_combo = devices_child(window, "COMBOBOX", "", 0, 120, 283, 200, 150,
+        WS_VSCROLL | WS_TABSTOP | 0x0003);
+    GPU_VENDOR_COMBO.store(gpu_vendor_combo, Ordering::Relaxed);
+    let mut vendors = vec!["Default".to_owned(), "NVIDIA".to_owned(), "AMD".to_owned()];
+    if !vendors.contains(&config.gpu_adapter) { vendors.push(config.gpu_adapter.clone()); }
+    let vendor_index = vendors.iter().position(|name| name == &config.gpu_adapter).unwrap_or(0);
+    for vendor in &vendors {
+        let wide: Vec<u16> = vendor.encode_utf16().chain(Some(0)).collect();
+        SendMessageW(gpu_vendor_combo, 0x0143, 0, wide.as_ptr() as isize);
+    }
+    SendMessageW(gpu_vendor_combo, 0x014E, vendor_index, 0);
+    *GPU_VENDOR_CHOICES.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap() = vendors;
+    devices_child(window, "STATIC", "Index", 0, 325, 285, 50, 24, 0);
     let edit = devices_child(window, "EDIT", &config.gpu_index.to_string(), 0,
-        345, 283, 95, 28, WS_BORDER | WS_TABSTOP);
+        390, 283, 95, 28, WS_BORDER | WS_TABSTOP);
     GPU_INDEX_EDIT.store(edit, Ordering::Relaxed);
     devices_child(window, "STATIC", "Telemetry refresh", 0,
         20, 330, 180, 24, 0);
