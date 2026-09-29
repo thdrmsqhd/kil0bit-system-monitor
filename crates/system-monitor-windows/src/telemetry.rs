@@ -159,8 +159,12 @@ impl TelemetryCollector {
         let gpu_samples = if config.show_gpu || config.show_temp {
             self.gpu_counters.as_ref().map(|group| group.sample()).unwrap_or_default()
         } else { Vec::new() };
-        let identifier = format!("phys_{}", config.gpu_index);
-        let selected_gpu = gpu_samples.iter().filter(|(name, _)| name.contains(&identifier));
+        let selected_gpu = gpu_samples.iter().filter(|(name, _)| {
+            name.to_ascii_lowercase()
+                .split("_phys_").nth(1)
+                .and_then(|tail| tail.split('_').next())
+                .and_then(|index| index.parse::<u32>().ok()) == Some(config.gpu_index)
+        });
         let fallback_gpu = selected_gpu.clone().map(|(_, usage)| *usage).reduce(f32::max);
         let gpu_temperature_c = gpu.as_ref().and_then(|v| v.temperature_c)
             .or_else(|| selected_gpu.clone()
