@@ -84,6 +84,10 @@ const DEVICES_SAVE: usize = 1101;
 const SETTINGS_DEEPSEEK: usize = 1024;
 const DEEPSEEK_SAVE: usize = 1201;
 const DEEPSEEK_REMOVE: usize = 1202;
+const SETTINGS_MAINTENANCE: usize = 1025;
+const MAINTENANCE_RESET_APPEARANCE: usize = 1301;
+const MAINTENANCE_RESET_ALL: usize = 1302;
+const MAINTENANCE_IMPORT_LEGACY: usize = 1303;
 const AI_INTERVALS: [u32; 4] = [60, 300, 900, 3600];
 const BM_GETCHECK: u32 = 0x00F0;
 const BM_SETCHECK: u32 = 0x00F1;
@@ -131,6 +135,8 @@ static DISK_CHOICES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static DEEPSEEK_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static DEEPSEEK_KEY_EDIT: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(null_mut());
+static MAINTENANCE_HANDLE: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(null_mut());
 static DEEPSEEK_SNAPSHOT: OnceLock<Mutex<Option<super::ai_usage::DeepSeekBalanceSnapshot>>> = OnceLock::new();
 static DEEPSEEK_WORKER: OnceLock<Mutex<Option<super::ai_usage::DeepSeekWorker>>> = OnceLock::new();
@@ -650,6 +656,10 @@ unsafe extern "system" fn settings_window_proc(
             open_deepseek_window(hwnd);
             0
         }
+        WM_COMMAND if (wparam & 0xffff) == SETTINGS_MAINTENANCE => {
+            open_maintenance_window(hwnd);
+            0
+        }
         WM_CLOSE => {
             DestroyWindow(hwnd);
             0
@@ -659,6 +669,8 @@ unsafe extern "system" fn settings_window_proc(
             if !devices.is_null() { DestroyWindow(devices); }
             let deepseek = DEEPSEEK_HANDLE.swap(null_mut(), Ordering::Relaxed);
             if !deepseek.is_null() { DestroyWindow(deepseek); }
+            let maintenance = MAINTENANCE_HANDLE.swap(null_mut(), Ordering::Relaxed);
+            if !maintenance.is_null() { DestroyWindow(maintenance); }
             SETTINGS_HANDLE
                 .compare_exchange(hwnd, null_mut(), Ordering::Relaxed, Ordering::Relaxed)
                 .ok();
@@ -936,6 +948,8 @@ unsafe fn open_settings_window(owner: Hwnd) {
         null_mut(),
     );
     STARTUP_CHECKBOX.store(startup, Ordering::Relaxed);
+    devices_child(window, "BUTTON", "Reset / import...", SETTINGS_MAINTENANCE,
+        375, 376, 145, 28, WS_TABSTOP);
     if config_lock()
         .lock()
         .map(|config| config.launch_on_startup)
@@ -1030,6 +1044,130 @@ unsafe fn open_settings_window(owner: Hwnd) {
     UpdateWindow(window);
 }
 
+unsafe extern "system" fn maintenance_window_proc(
+    hwnd: Hwnd, message: u32, wparam: usize, lparam: isize,
+) -> Lresult {
+    match message {
+        WM_COMMAND if (wparam & 0xffff) == MAINTENANCE_RESET_APPEARANCE => {
+            if confirm_maintenance(hwnd, "Reset appearance settings?") {
+                let defaults = AppConfig::default();
+                if let Ok(mut config) = config_lock().lock() {
+                    config.display_style = defaults.display_style;
+                    config.font_family = defaults.font_family;
+                    config.accent_color_hex = defaults.accent_color_hex;
+                    config.label_color_hex = defaults.label_color_hex;
+                    config.background_color_hex = defaults.background_color_hex;
+                    config.pod_color_hex = defaults.pod_color_hex;
+                    config.scale_factor = defaults.scale_factor;
+                    config.column_spacing = defaults.column_spacing;
+                    config.is_text_bold = defaults.is_text_bold;
+                    config.show_pods = defaults.show_pods;
+                    config.show_background = defaults.show_background;
+                    config.theme = defaults.theme;
+                    config.net_label_color_hex = None;
+                    config.cpu_ram_label_color_hex = None;
+                    config.gpu_label_color_hex = None;
+                    config.disk_label_color_hex = None;
+                    config.net_accent_color_hex = None;
+                    config.cpu_ram_accent_color_hex = None;
+                    config.gpu_accent_color_hex = None;
+                    config.disk_accent_color_hex = None;
+                    let _ = config_store::save(&config_path(), &config);
+                }
+                maintenance_refresh();
+            }
+            0
+        }
+        WM_COMMAND if (wparam & 0xffff) == MAINTENANCE_RESET_ALL => {
+            if confirm_maintenance(hwnd, "Reset all Rust monitor settings?") {
+                if let Ok(mut config) = config_lock().lock() {
+                    *config = AppConfig::default();
+                    let _ = config_store::save(&config_path(), &config);
+                }
+                load_config();
+                if let Some(worker) = AI_WORKER.get()
+                    .and_then(|v| v.lock().ok()).and_then(|mut v| v.take()) { drop(worker); }
+                if let Some(worker) = DEEPSEEK_WORKER.get()
+                    .and_then(|v| v.lock().ok()).and_then(|mut v| v.take()) { drop(worker); }
+                if let Some(value) = AI_SNAPSHOT.get() {
+                    if let Ok(mut value) = value.lock() { *value = None; }
+                }
+                if let Some(value) = DEEPSEEK_SNAPSHOT.get() {
+                    if let Ok(mut value) = value.lock() { *value = None; }
+                }
+                maintenance_refresh();
+            }
+            0
+        }
+        WM_COMMAND if (wparam & 0xffff) == MAINTENANCE_IMPORT_LEGACY => {
+            let legacy = std::env::var_os("APPDATA")
+                .map(std::path::PathBuf::from)
+                .map(|root| root.join("kil0bit-system-monitor").join("config.json"));
+            let imported = legacy.as_deref().and_then(|path| config_store::import_legacy(path).ok());
+            let result = if let Some(config) = imported {
+                if let Ok(mut current) = config_lock().lock() {
+                    *current = config;
+                    let _ = config_store::save(&config_path(), &current);
+                }
+                load_config();
+                start_ai_worker(OVERLAY_HANDLE.load(Ordering::Relaxed));
+                start_deepseek_worker(OVERLAY_HANDLE.load(Ordering::Relaxed));
+                maintenance_refresh();
+                "Legacy settings imported; the original file was not modified."
+            } else { "Could not read a valid legacy settings file." };
+            let wide: Vec<u16> = result.encode_utf16().chain(Some(0)).collect();
+            let title: Vec<u16> = "Import legacy config\0".encode_utf16().collect();
+            MessageBoxW(hwnd, wide.as_ptr(), title.as_ptr(), 0);
+            0
+        }
+        WM_CLOSE => { DestroyWindow(hwnd); 0 }
+        WM_DESTROY => { MAINTENANCE_HANDLE.store(null_mut(), Ordering::Relaxed); 0 }
+        _ => DefWindowProcW(hwnd, message, wparam, lparam),
+    }
+}
+
+unsafe fn confirm_maintenance(hwnd: Hwnd, question: &str) -> bool {
+    let wide: Vec<u16> = question.encode_utf16().chain(Some(0)).collect();
+    let title: Vec<u16> = "Confirm settings change\0".encode_utf16().collect();
+    MessageBoxW(hwnd, wide.as_ptr(), title.as_ptr(), 4 | 0x20) == 6
+}
+
+unsafe fn maintenance_refresh() {
+    let overlay = OVERLAY_HANDLE.load(Ordering::Relaxed);
+    if !overlay.is_null() { PostMessageW(overlay, WM_APP_REFRESH, 0, 0); }
+    let settings = SETTINGS_HANDLE.load(Ordering::Relaxed);
+    if !settings.is_null() {
+        DestroyWindow(settings);
+        if !overlay.is_null() { open_settings_window(overlay); }
+    }
+}
+
+unsafe fn open_maintenance_window(owner: Hwnd) {
+    let existing = MAINTENANCE_HANDLE.load(Ordering::Relaxed);
+    if !existing.is_null() { ShowWindow(existing, SW_SHOW); return; }
+    let class_name: Vec<u16> = "Kil0bitRustMaintenance\0".encode_utf16().collect();
+    let title: Vec<u16> = "Reset and import\0".encode_utf16().collect();
+    let instance = GetModuleHandleW(null());
+    let class = WindowClass {
+        style: 0, window_proc: Some(maintenance_window_proc), class_extra: 0,
+        window_extra: 0, instance, icon: null_mut(), cursor: null_mut(),
+        background: null_mut(), menu_name: null(), class_name: class_name.as_ptr(),
+    };
+    if RegisterClassW(&class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS { return; }
+    let window = CreateWindowExW(WS_EX_TOOLWINDOW, class_name.as_ptr(), title.as_ptr(),
+        WS_OVERLAPPEDWINDOW, 430, 230, 460, 300, owner, null_mut(), instance, null_mut());
+    if window.is_null() { return; }
+    MAINTENANCE_HANDLE.store(window, Ordering::Relaxed);
+    devices_child(window, "BUTTON", "Reset appearance", MAINTENANCE_RESET_APPEARANCE,
+        25, 25, 385, 40, WS_TABSTOP);
+    devices_child(window, "BUTTON", "Reset all Rust settings", MAINTENANCE_RESET_ALL,
+        25, 80, 385, 40, WS_TABSTOP);
+    devices_child(window, "BUTTON", "Import legacy settings (read-only)", MAINTENANCE_IMPORT_LEGACY,
+        25, 135, 385, 40, WS_TABSTOP);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+}
+
 unsafe extern "system" fn devices_window_proc(
     hwnd: Hwnd, message: u32, wparam: usize, lparam: isize,
 ) -> Lresult {
@@ -1079,6 +1217,7 @@ unsafe extern "system" fn devices_window_proc(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn devices_child(parent: Hwnd, class: &str, caption: &str, id: usize,
     x: i32, y: i32, width: i32, height: i32, style: u32) -> Hwnd {
     let class: Vec<u16> = class.encode_utf16().chain(Some(0)).collect();
@@ -1109,8 +1248,8 @@ unsafe fn open_devices_window(owner: Hwnd) {
         WS_VSCROLL | WS_TABSTOP | 0x0003);
     NETWORK_COMBO.store(combo, Ordering::Relaxed);
     let mut networks = vec!["Default".to_owned()];
-    networks.extend(sysinfo::Networks::new_with_refreshed_list().iter()
-        .map(|(name, _)| name.clone()).filter(|name| !name.contains("Loopback")));
+    networks.extend(sysinfo::Networks::new_with_refreshed_list().keys()
+        .filter(|name| !name.contains("Loopback")).cloned());
     networks.sort();
     networks.dedup();
     let selected_network = networks.iter().position(|name| *name == config.network_adapter)

@@ -2,9 +2,9 @@
 #![cfg_attr(all(not(windows), feature = "win32-api-check"), allow(dead_code))]
 
 pub mod ai_usage;
+mod bitmap;
 mod gpu;
 mod pdh;
-mod bitmap;
 pub mod secret_store;
 pub mod telemetry;
 

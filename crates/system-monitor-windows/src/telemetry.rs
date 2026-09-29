@@ -74,14 +74,25 @@ impl TelemetryCollector {
         } else {
             used_memory as f32 / total_memory as f32 * 100.0
         };
-        let first_disk = self.disks.iter().map(|disk| disk.mount_point().to_string_lossy().into_owned()).min();
+        let first_disk = self
+            .disks
+            .iter()
+            .map(|disk| disk.mount_point().to_string_lossy().into_owned())
+            .min();
         let selected = |name: &str| {
             (config.selected_disks == "Default" && first_disk.as_deref() == Some(name))
                 || config.selected_disks == "All"
                 || (config.selected_disks != "None"
-                    && config.selected_disks.split(';').any(|item| item.trim() == name))
+                    && config
+                        .selected_disks
+                        .split(';')
+                        .any(|item| item.trim() == name))
         };
-        let disk_activity = self.disk_counters.as_ref().map(|group| group.sample()).unwrap_or_default();
+        let disk_activity = self
+            .disk_counters
+            .as_ref()
+            .map(|group| group.sample())
+            .unwrap_or_default();
         let disk_metrics: Vec<DiskMetric> = self
             .disks
             .iter()
@@ -96,9 +107,11 @@ impl TelemetryCollector {
                 }
                 let used = total.saturating_sub(disk.available_space());
                 let drive = name.trim_end_matches('\\');
-                let activity_percent = disk_activity.iter()
+                let activity_percent = disk_activity
+                    .iter()
                     .filter(|(instance, _)| instance.contains(drive))
-                    .map(|(_, usage)| *usage).fold(0.0, f32::max);
+                    .map(|(_, usage)| *usage)
+                    .fold(0.0, f32::max);
                 Some(DiskMetric {
                     name,
                     space_percent: used as f32 / total as f32 * 100.0,
@@ -106,7 +119,12 @@ impl TelemetryCollector {
                 })
             })
             .collect();
-        let total_space: u128 = self.disks.iter().filter(|d| selected(&d.mount_point().to_string_lossy())).map(|d| d.total_space() as u128).sum();
+        let total_space: u128 = self
+            .disks
+            .iter()
+            .filter(|d| selected(&d.mount_point().to_string_lossy()))
+            .map(|d| d.total_space() as u128)
+            .sum();
         let used_space: u128 = self
             .disks
             .iter()
@@ -120,19 +138,27 @@ impl TelemetryCollector {
         };
         let gpu = if config.show_gpu || config.show_temp {
             super::gpu::sample_nvidia(config.gpu_index as usize)
+                .or_else(|| super::gpu::sample_amd(config.gpu_index as usize))
         } else {
             None
         };
         let fallback_gpu = if gpu.is_none() && config.show_gpu {
             self.gpu_counters.as_ref().and_then(|group| {
                 let identifier = format!("phys_{}", config.gpu_index);
-                group.sample().into_iter()
+                group
+                    .sample()
+                    .into_iter()
                     .filter(|(name, _)| name.contains(&identifier))
-                    .map(|(_, usage)| usage).reduce(f32::max)
+                    .map(|(_, usage)| usage)
+                    .reduce(f32::max)
             })
-        } else { None };
-        let disk_usage_percent = disk_metrics.iter()
-            .map(|disk| disk.activity_percent).fold(0.0, f32::max);
+        } else {
+            None
+        };
+        let disk_usage_percent = disk_metrics
+            .iter()
+            .map(|disk| disk.activity_percent)
+            .fold(0.0, f32::max);
         SystemMetrics {
             cpu_usage_percent: self.system.global_cpu_usage().clamp(0.0, 100.0),
             ram_percent: ram_percent.clamp(0.0, 100.0),
@@ -144,11 +170,13 @@ impl TelemetryCollector {
             disk_usage_percent,
             disk_activity_available: !disk_activity.is_empty(),
             disks: disk_metrics,
-            gpu_usage_percent: gpu.as_ref().map(|v| v.usage_percent)
-                .or(fallback_gpu).unwrap_or(0.0),
+            gpu_usage_percent: gpu
+                .as_ref()
+                .map(|v| v.usage_percent)
+                .or(fallback_gpu)
+                .unwrap_or(0.0),
             gpu_usage_available: gpu.is_some() || fallback_gpu.is_some(),
             gpu_temperature_c: gpu.and_then(|v| v.temperature_c),
-            ..SystemMetrics::default()
         }
     }
 

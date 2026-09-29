@@ -67,14 +67,23 @@ pub fn build_metrics_bitmap(
         "K",
         format!("{}%", metrics.disk_used_percent.clamp(0.0, 100.0) as u32),
     );
-    add(config.show_disk_speed, "ACT", "A",
+    add(
+        config.show_disk_speed,
+        "ACT",
+        "A",
         if metrics.disk_activity_available {
             format!("{}%", metrics.disk_usage_percent.clamp(0.0, 100.0) as u32)
-        } else { "NA".into() });
+        } else {
+            "NA".into()
+        },
+    );
     if config.show_disk {
         for disk in &metrics.disks {
             let name = disk.name.trim_end_matches(['\\', '/']);
-            fields.push((format!("{name} {}%", disk.space_percent as u32), global_color));
+            fields.push((
+                format!("{name} {}%", disk.space_percent as u32),
+                global_color,
+            ));
         }
     }
     if config.opencode_enabled || config.codex_enabled {
@@ -114,7 +123,10 @@ pub fn build_metrics_bitmap(
     if config.deepseek_enabled {
         if let Some(balance) = deepseek {
             for entry in &balance.balances {
-                fields.push((format!("DS {} {:.2}", entry.currency, entry.total), [30, 200, 80]));
+                fields.push((
+                    format!("DS {} {:.2}", entry.currency, entry.total),
+                    [30, 200, 80],
+                ));
             }
         }
     }
@@ -131,7 +143,11 @@ pub fn build_metrics_bitmap(
     let width = (32 + char_count * 12).max(52);
     let height = HEIGHT;
     let mut pixels = vec![0; width as usize * height as usize * BYTES_PER_PIXEL];
-    let alpha = if config.show_background || config.show_pods { 230 } else { 0 };
+    let alpha = if config.show_background || config.show_pods {
+        230
+    } else {
+        0
+    };
     let capsule = if alternate_accent {
         [28u8, 78, 30]
     } else {
@@ -139,7 +155,8 @@ pub fn build_metrics_bitmap(
             &config.background_color_hex
         } else {
             &config.pod_color_hex
-        }).unwrap_or([38u8, 31, 24])
+        })
+        .unwrap_or([38u8, 31, 24])
     };
     let radius = if config.show_pods { 13 } else { 0 };
     for y in 0..height {
@@ -184,7 +201,9 @@ pub fn build_metrics_bitmap(
 fn parse_hex_bgr(input: &str) -> Option<[u8; 3]> {
     let hex = input.trim_start_matches('#');
     let rgb = if hex.len() == 8 { &hex[2..] } else { hex };
-    if rgb.len() != 6 { return None; }
+    if rgb.len() != 6 {
+        return None;
+    }
     let red = u8::from_str_radix(&rgb[0..2], 16).ok()?;
     let green = u8::from_str_radix(&rgb[2..4], 16).ok()?;
     let blue = u8::from_str_radix(&rgb[4..6], 16).ok()?;

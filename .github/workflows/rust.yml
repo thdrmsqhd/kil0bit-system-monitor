@@ -28,11 +28,19 @@ jobs:
         run: cargo build --workspace --release --target x86_64-pc-windows-msvc
       - name: Assemble Rust-only portable directory
         run: cargo run -p system-monitor-core --bin package_port -- target/x86_64-pc-windows-msvc/release/system-monitor-windows.exe rust-port-package
+      - name: Archive portable directory and checksum
+        shell: cmd
+        run: |
+          tar -a -c -f rust-port.zip -C rust-port-package .
+          certutil -hashfile rust-port.zip SHA256 > rust-port.zip.sha256.txt
       - name: Upload Rust-only package
         uses: actions/upload-artifact@v4
         with:
           name: kil0bit-system-monitor-rust-port
-          path: rust-port-package
+          path: |
+            rust-port-package
+            rust-port.zip
+            rust-port.zip.sha256.txt
       - name: Win32 layered-window smoke test
         shell: pwsh
         run: >-
