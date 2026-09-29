@@ -152,13 +152,15 @@ impl TelemetryCollector {
         };
         let gpu = if config.show_gpu || config.show_temp {
             let vendor = config.gpu_adapter.to_ascii_lowercase();
-            if vendor.contains("amd") {
+            if vendor.contains("amd") || vendor.contains("radeon") {
                 super::gpu::sample_amd(config.gpu_index as usize)
-            } else if vendor.contains("nvidia") {
+            } else if vendor.contains("nvidia") || vendor.contains("geforce") {
                 super::gpu::sample_nvidia(config.gpu_index as usize)
-            } else {
+            } else if vendor == "default" {
                 super::gpu::sample_nvidia(config.gpu_index as usize)
                     .or_else(|| super::gpu::sample_amd(config.gpu_index as usize))
+            } else {
+                None
             }
         } else {
             None
