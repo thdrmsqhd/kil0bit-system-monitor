@@ -38,6 +38,8 @@ fn package() -> Result<(), Box<dyn std::error::Error>> {
         "Settings are stored under %APPDATA%\\Kil0bitSystemMonitorRust. API credentials are stored separately with Windows DPAPI.\r\n",
         "Launch this executable to show Settings; launch with --startup to suppress the first-run Settings window.\r\n",
         "Original project: kil0bit-kb/kil0bit-system-monitor (MIT). The included LICENSE applies to this derivative.\r\n",
+        "For a portable upgrade, close the monitor and replace only the executable; settings remain in AppData.\r\n",
+        "To remove it, disable Launch on Startup in Settings, close the monitor, and delete the portable folder. Optionally remove the Rust-specific AppData and LocalAppData folders.\r\n",
         "Hardware-specific GPU paths and Windows 11 interactions require device-side validation. The original executable was not run for comparison.\r\n",
     ))?;
     Ok(())

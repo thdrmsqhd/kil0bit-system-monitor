@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::time::Instant;
+use std::time::Duration;
 use sysinfo::{Disks, Networks, System};
 use system_monitor_core::{
     bytes_per_second_to_kib, format_network_rate, DiskMetric, SystemMetrics,
@@ -17,6 +18,8 @@ pub struct TelemetryCollector {
     adapter_totals: HashMap<String, (u64, u64)>,
     disk_counters: Option<super::pdh::CounterGroup>,
     gpu_counters: Option<super::pdh::CounterGroup>,
+    last_counter_probe: Instant,
+    last_disk_names: Vec<String>,
 }
 
 impl TelemetryCollector {
@@ -34,6 +37,8 @@ impl TelemetryCollector {
             adapter_totals: HashMap::new(),
             disk_counters: super::pdh::CounterGroup::new("\\PhysicalDisk(*)\\% Disk Time"),
             gpu_counters: super::pdh::CounterGroup::new("\\GPU Engine(*)\\Utilization Percentage"),
+            last_counter_probe: Instant::now(),
+            last_disk_names: Vec::new(),
         }
     }
 
@@ -45,6 +50,15 @@ impl TelemetryCollector {
         self.system.refresh_memory();
         self.networks.refresh(true);
         self.disks.refresh(true);
+        let mut disk_names: Vec<_> = self.disks.iter()
+            .map(|disk| disk.mount_point().to_string_lossy().into_owned()).collect();
+        disk_names.sort();
+        if disk_names != self.last_disk_names || now.duration_since(self.last_counter_probe) >= Duration::from_secs(30) {
+            self.disk_counters = super::pdh::CounterGroup::new("\\PhysicalDisk(*)\\% Disk Time");
+            self.gpu_counters = super::pdh::CounterGroup::new("\\GPU Engine(*)\\Utilization Percentage");
+            self.last_disk_names = disk_names;
+            self.last_counter_probe = now;
+        }
         let mut up = 0.0;
         let mut down = 0.0;
         self.adapter_totals.clear();
@@ -142,19 +156,15 @@ impl TelemetryCollector {
         } else {
             None
         };
-        let fallback_gpu = if gpu.is_none() && config.show_gpu {
-            self.gpu_counters.as_ref().and_then(|group| {
-                let identifier = format!("phys_{}", config.gpu_index);
-                group
-                    .sample()
-                    .into_iter()
-                    .filter(|(name, _)| name.contains(&identifier))
-                    .map(|(_, usage)| usage)
-                    .reduce(f32::max)
-            })
-        } else {
-            None
-        };
+        let gpu_samples = if config.show_gpu || config.show_temp {
+            self.gpu_counters.as_ref().map(|group| group.sample()).unwrap_or_default()
+        } else { Vec::new() };
+        let identifier = format!("phys_{}", config.gpu_index);
+        let selected_gpu = gpu_samples.iter().filter(|(name, _)| name.contains(&identifier));
+        let fallback_gpu = selected_gpu.clone().map(|(_, usage)| *usage).reduce(f32::max);
+        let gpu_temperature_c = gpu.as_ref().and_then(|v| v.temperature_c)
+            .or_else(|| selected_gpu.clone()
+                .find_map(|(name, _)| super::gpu::sample_d3dkmt_temperature(name)));
         let disk_usage_percent = disk_metrics
             .iter()
             .map(|disk| disk.activity_percent)
@@ -176,7 +186,7 @@ impl TelemetryCollector {
                 .or(fallback_gpu)
                 .unwrap_or(0.0),
             gpu_usage_available: gpu.is_some() || fallback_gpu.is_some(),
-            gpu_temperature_c: gpu.and_then(|v| v.temperature_c),
+            gpu_temperature_c,
         }
     }
 

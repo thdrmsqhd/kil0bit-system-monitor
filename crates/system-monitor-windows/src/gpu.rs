@@ -125,3 +125,53 @@ pub fn sample_amd(index: usize) -> Option<GpuReading> {
 
 #[cfg(not(windows))]
 pub fn sample_amd(_: usize) -> Option<GpuReading> { None }
+
+#[cfg(windows)]
+pub fn sample_d3dkmt_temperature(engine_instance: &str) -> Option<f32> {
+    use std::mem::{size_of, zeroed};
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct Luid { low: u32, high: i32 }
+    #[repr(C)]
+    struct Open { luid: Luid, adapter: u32 }
+    #[repr(C)]
+    struct Query { adapter: u32, kind: u32, data: *mut c_void, size: u32 }
+    #[repr(C)]
+    struct PerfData {
+        thermal_throttling: u32,
+        current_frequency: u64, max_frequency: u64, max_frequency_oc: u64,
+        memory_frequency: u64, memory_frequency_oc: u64,
+        fan_speed: u32, temperature: u32, voltage: u32,
+        memory_usage: u32, max_memory_usage: u32,
+        core_clock: u64, memory_clock: u64,
+    }
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn D3DKMTOpenAdapterFromLuid(data: *mut Open) -> i32;
+        fn D3DKMTQueryAdapterInfo(data: *mut Query) -> i32;
+        fn D3DKMTCloseAdapter(data: *mut u32) -> i32;
+    }
+    let lower = engine_instance.to_ascii_lowercase();
+    let luid = lower.split("luid_").nth(1)?
+        .split("_phys_").next()?;
+    let mut parts = luid.split('_');
+    let low = u32::from_str_radix(parts.next()?.trim_start_matches("0x"), 16).ok()?;
+    let high = u32::from_str_radix(parts.next()?.trim_start_matches("0x"), 16).ok()? as i32;
+    let mut open = Open { luid: Luid { low, high }, adapter: 0 };
+    unsafe {
+        if D3DKMTOpenAdapterFromLuid(&mut open) != 0 { return None; }
+        let mut data: PerfData = zeroed();
+        let mut query = Query {
+            adapter: open.adapter, kind: 35,
+            data: (&mut data as *mut PerfData).cast(), size: size_of::<PerfData>() as u32,
+        };
+        let status = D3DKMTQueryAdapterInfo(&mut query);
+        D3DKMTCloseAdapter(&mut open.adapter);
+        if status == 0 && (1..1200).contains(&data.temperature) {
+            Some(data.temperature as f32 / 10.0)
+        } else { None }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn sample_d3dkmt_temperature(_: &str) -> Option<f32> { None }

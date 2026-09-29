@@ -203,6 +203,10 @@ pub fn build_metrics_bitmap(
     let text_width = glyphs.len() as i32 * 12 - if glyphs.is_empty() { 0 } else { 2 };
     let origin_x = ((width - text_width) / 2).max(16);
     let origin_y = (HEIGHT - 7 * scale) / 2 + line_index as i32 * 26;
+    if super::font_raster::draw_text(&mut pixels, width, height, glyphs,
+        origin_x, origin_y - 2, &config.font_family, config.is_text_bold) {
+        continue;
+    }
     for (index, (ch, color)) in glyphs.iter().enumerate() {
         let rows = glyph(*ch);
         for (row, bits) in rows.iter().enumerate() {

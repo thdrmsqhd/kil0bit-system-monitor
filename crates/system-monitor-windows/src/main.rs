@@ -4,6 +4,7 @@
 pub mod ai_usage;
 mod bitmap;
 mod gpu;
+mod font_raster;
 mod pdh;
 pub mod secret_store;
 pub mod telemetry;
