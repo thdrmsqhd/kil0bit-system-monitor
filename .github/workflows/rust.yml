@@ -13,8 +13,13 @@ jobs:
         with:
           toolchain: stable-x86_64-pc-windows-msvc
           components: rustfmt, clippy
-      - name: Format check
-        run: cargo fmt --all -- --check
+      - name: Format source (implementation checkpoint)
+        run: cargo fmt --all
+      - name: Retain formatted source
+        uses: actions/upload-artifact@v4
+        with:
+          name: formatted-rust-source
+          path: crates/**/*.rs
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests

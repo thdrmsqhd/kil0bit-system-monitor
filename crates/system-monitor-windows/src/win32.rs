@@ -23,6 +23,7 @@ type Lresult = isize;
 type WndProc = unsafe extern "system" fn(Hwnd, u32, usize, isize) -> Lresult;
 
 const WS_POPUP: u32 = 0x8000_0000;
+const WS_CAPTION: isize = 0x00C0_0000;
 const WS_EX_TOPMOST: u32 = 0x0000_0008;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 const WS_EX_LAYERED: u32 = 0x0008_0000;
@@ -105,6 +106,7 @@ static FREE_X: AtomicI32 = AtomicI32::new(100);
 static FREE_Y: AtomicI32 = AtomicI32::new(100);
 static ALTERNATE_ACCENT: AtomicBool = AtomicBool::new(false);
 static FULLSCREEN_HIDDEN: AtomicBool = AtomicBool::new(false);
+static FULLSCREEN_CANDIDATE: Mutex<(bool, u8)> = Mutex::new((false, 0));
 static DPI_SCALE_PERCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
 static CONFIG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 static APP_CONFIG: OnceLock<Mutex<AppConfig>> = OnceLock::new();
@@ -202,6 +204,13 @@ struct Rect {
     top: i32,
     right: i32,
     bottom: i32,
+}
+#[repr(C)]
+struct MonitorInfo {
+    size: u32,
+    monitor: Rect,
+    work: Rect,
+    flags: u32,
 }
 #[repr(C)]
 struct AppBarData {
@@ -308,8 +317,10 @@ extern "system" {
     fn GetForegroundWindow() -> Hwnd;
     fn MessageBoxW(hwnd: Hwnd, text: *const u16, caption: *const u16, flags: u32) -> i32;
     fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
+    fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize;
+    fn MonitorFromWindow(hwnd: Hwnd, flags: u32) -> Hwnd;
+    fn GetMonitorInfoW(monitor: Hwnd, info: *mut MonitorInfo) -> i32;
     fn GetClassNameW(hwnd: Hwnd, class_name: *mut u16, max_count: i32) -> i32;
-    fn GetSystemMetrics(index: i32) -> i32;
     fn SetWindowPos(
         hwnd: Hwnd,
         insert_after: Hwnd,
@@ -2102,16 +2113,28 @@ unsafe fn update_fullscreen_visibility(hwnd: Hwnd) {
                 right: 0,
                 bottom: 0,
             };
-            let screen_width = GetSystemMetrics(0);
-            let screen_height = GetSystemMetrics(1);
-            hidden = screen_width > 0
-                && screen_height > 0
+            let monitor = MonitorFromWindow(foreground, 2);
+            let mut info = MonitorInfo {
+                size: size_of::<MonitorInfo>() as u32,
+                monitor: Rect { left: 0, top: 0, right: 0, bottom: 0 },
+                work: Rect { left: 0, top: 0, right: 0, bottom: 0 },
+                flags: 0,
+            };
+            hidden = !monitor.is_null()
+                && GetMonitorInfoW(monitor, &mut info) != 0
                 && GetWindowRect(foreground, &mut rect) != 0
-                && rect.left <= 0
-                && rect.top <= 0
-                && rect.right >= screen_width
-                && rect.bottom >= screen_height;
+                && GetWindowLongPtrW(foreground, -16) & WS_CAPTION == 0
+                && rect.left <= info.monitor.left && rect.top <= info.monitor.top
+                && rect.right >= info.monitor.right && rect.bottom >= info.monitor.bottom;
         }
+    }
+    if let Ok(mut candidate) = FULLSCREEN_CANDIDATE.lock() {
+        if candidate.0 != hidden {
+            *candidate = (hidden, 1);
+            return;
+        }
+        candidate.1 = candidate.1.saturating_add(1);
+        if candidate.1 < 2 { return; }
     }
     let previous = FULLSCREEN_HIDDEN.swap(hidden, Ordering::Relaxed);
     if previous != hidden {
