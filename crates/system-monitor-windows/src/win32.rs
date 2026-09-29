@@ -45,6 +45,8 @@ const WM_DPICHANGED: u32 = 0x02E0;
 const WM_COMMAND: u32 = 0x0111;
 const WM_TIMER: u32 = 0x0113;
 const FADE_TIMER_ID: usize = 2;
+const DRAG_TIMER_ID: usize = 3;
+const VK_LBUTTON: i32 = 0x01;
 const WM_APP_REFRESH: u32 = 0x8001;
 const WM_APP_SHOW_SETTINGS: u32 = 0x8002;
 const WM_APP_DRAG_DIAGNOSTIC: u32 = 0x8003;
@@ -109,6 +111,7 @@ const SW_SHOW: i32 = 5;
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 const ERROR_ALREADY_EXISTS: u32 = 183;
 static POSITION_LOCKED: AtomicBool = AtomicBool::new(false);
+static DRAG_POLL: Mutex<Option<(Point, Point)>> = Mutex::new(None);
 static DRAG_NC_DOWN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static DRAG_CLIENT_DOWN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static DRAG_CLIENT_MOVE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -350,6 +353,7 @@ extern "system" {
     fn CreatePopupMenu() -> *mut c_void;
     fn AppendMenuW(menu: *mut c_void, flags: u32, item_id: usize, text: *const u16) -> i32;
     fn GetCursorPos(point: *mut Point) -> i32;
+    fn GetAsyncKeyState(key: i32) -> i16;
     fn TrackPopupMenu(
         menu: *mut c_void,
         flags: u32,
@@ -500,8 +504,13 @@ unsafe extern "system" fn window_proc(
             if next == target { KillTimer(hwnd, FADE_TIMER_ID); }
             0
         }
+        WM_TIMER if wparam == DRAG_TIMER_ID => {
+            poll_drag(hwnd);
+            0
+        }
         WM_DESTROY => {
             KillTimer(hwnd, FADE_TIMER_ID);
+            KillTimer(hwnd, DRAG_TIMER_ID);
             if let Some(worker) = TELEMETRY_WORKER.get()
                 .and_then(|v| v.lock().ok())
                 .and_then(|mut v| v.take()) {
@@ -2318,6 +2327,7 @@ pub fn run(_pixels: &[u8], _width: i32, _height: i32) -> Result<(), WinError> {
         } else {
             ShowWindow(hwnd, 0);
         }
+        SetTimer(hwnd, DRAG_TIMER_ID, 16, null_mut());
         start_ai_worker(hwnd);
         start_deepseek_worker(hwnd);
         start_telemetry_worker(hwnd, telemetry);
@@ -2647,6 +2657,53 @@ unsafe fn update_fullscreen_visibility(hwnd: Hwnd) {
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
         if app_visible { SetTimer(hwnd, FADE_TIMER_ID, 16, null_mut()); }
+    }
+}
+
+unsafe fn poll_drag(hwnd: Hwnd) {
+    let left_button_down = GetAsyncKeyState(VK_LBUTTON) & i16::MIN != 0;
+    let mut drag = match DRAG_POLL.lock() {
+        Ok(drag) => drag,
+        Err(_) => return,
+    };
+    if POSITION_LOCKED.load(Ordering::Relaxed) || !left_button_down {
+        if drag.take().is_some() {
+            save_position();
+        }
+        return;
+    }
+    let mut cursor = Point { x: 0, y: 0 };
+    let mut rect = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if GetCursorPos(&mut cursor) == 0 || GetWindowRect(hwnd, &mut rect) == 0 {
+        return;
+    }
+    if drag.is_none()
+        && cursor.x >= rect.left
+        && cursor.x < rect.right
+        && cursor.y >= rect.top
+        && cursor.y < rect.bottom
+    {
+        *drag = Some((cursor, Point { x: rect.left, y: rect.top }));
+    }
+    if let Some((origin_cursor, origin_window)) = *drag {
+        let x = origin_window.x + cursor.x - origin_cursor.x;
+        let y = origin_window.y + cursor.y - origin_cursor.y;
+        if x != rect.left || y != rect.top {
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
     }
 }
 
