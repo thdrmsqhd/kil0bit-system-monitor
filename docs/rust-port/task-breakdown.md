@@ -5,7 +5,7 @@
 - **Function-level implementation tasks and I/O contracts:** [`function-task-breakdown.md`](function-task-breakdown.md)
 - **Baseline revision:** `c1173f9ecce858931f694661457ef2b905696da4`
 - **Extension scope:** after original parity work, add requested AI coding usage features under separate `AIU-*` IDs below.
-- **Task status:** see the Phase 0 execution record below; later phase tasks remain `TODO`.
+- **Task status:** Phase 0 is complete; Phases 1–8 are open or partially implemented. See [`handoff-2026-09-29.md`](handoff-2026-09-29.md) for the current checkpoint; a task only closes when its acceptance criteria and evidence pass.
 - **No-.NET rule:** no task builds or launches the original .NET application, installs .NET, or invokes `dotnet`. Rust verification runs on Windows with Rust/MSVC only.
 
 ## How to use the task IDs
@@ -44,11 +44,13 @@ No .NET command, .NET runtime, or original executable has been invoked. P0-T05 p
 |---|---|---|
 | P1-T01 Create native overlay HWND | Implemented Win32 class registration, layered popup creation, close handling, message loop, cleanup, and AppBar position notification in `crates/system-monitor-windows/src/win32.rs`. | `RUN_PASS`: Windows CI run `36402994870` found a visible `WS_EX_LAYERED` HWND with valid bounds and observed successful process exit after `WM_CLOSE`. |
 | P1-T02 Present a transparent bitmap | Implemented deterministic premultiplied BGRA capsule/text bitmap and layered presentation; three pixel/scale tests pass. | `RUN_PASS`: Windows CI run `36403912188` read the rendered white glyph from the desktop DC as `#f2f2f2`; layered surface dimensions were 192×52. |
-| P1-T03 Prototype drag and lock | Implemented `WM_NCHITTEST` caption hit-testing plus a right-click Lock/Unlock menu. | `RUN_PASS`: Windows CI run `36405034921` dragged while unlocked, confirmed unchanged bounds while locked, then confirmed dragging after unlock; run completed successfully on Windows Server 2022. |
+| P1-T03 Prototype drag and lock | Implemented `WM_NCHITTEST` caption hit-testing plus a right-click Lock/Unlock menu. | Historical `RUN_PASS`: run `36405034921`. Current gate remains open: run `36508140077` confirmed the app reported unlocked, but the overlay bounds did not move during the latest smoke. |
 | P1-T04 Prototype taskbar snap and position | Implemented primary taskbar owner/AppBar registration, vertical centering, Snap/Free menu toggle, temporary-file X/Y restore, and `ABM_WINDOWPOSCHANGED` notification. | `RUN_PASS` (toggle behavior): Windows CI run `36405034921` verified startup taskbar centering and Free/Snap transitions on a hosted shell. Restart persistence remains unverified. |
 | P1-T05 Prototype context menu and Settings window | Implemented Lock, Snap, Settings, and Exit PoT menu entries plus a native Settings window whose button changes overlay accent live. | `RUN_PASS`: Windows CI run `36405034921` opened the native context menu, clicked Settings, confirmed the visible Settings HWND, and closed the app cleanly. |
 | P1-T06 Exercise DPI/display transitions | Implemented per-monitor-v2 awareness request, `WM_DPICHANGED` bitmap scaling, suggested-bounds handling, and taskbar recentering on display/settings changes. | Scale math tests `RUN_PASS`; multiple physical display scales are not available on the current Windows Server CI runner and remain untested. |
-| P1-T07 Select renderer/UI toolkit and measure PoT | PoT uses a software BGRA surface + Win32 `UpdateLayeredWindow` and native Win32 Settings control. | `IN_PROGRESS`: Windows Server 2022 confirms HWND, compositing, menu, snap/free, drag, and lock behavior. Startup/resource measurements, settings live-property verification, Windows 11/DPI coverage, and final ADR selection remain open; Wine is unavailable in the local container. |
+| P1-T07 Select renderer/UI toolkit and measure PoT | PoT uses a software BGRA surface + Win32 `UpdateLayeredWindow` and native Win32 Settings control. | `IN_PROGRESS`: Windows Server 2022 confirms HWND/compositing/menu/snap-free behavior. Drag/lock passed on an earlier run but the latest regression failed; startup/resource measurements, Settings live-property verification, Windows 11/DPI coverage, and final ADR selection remain open. |
+
+Latest regression status (2026-09-29): Windows run `36508140077` passed formatting, Clippy, tests, MSVC release build, and package assembly, but the extended drag smoke failed after unlocking (`(100,100)` remained unchanged). Earlier successful drag evidence is historical and does not close the current gate. See [`handoff-2026-09-29.md`](handoff-2026-09-29.md).
 
 ## Phase 1 — Win32 and renderer proof of technology
 
