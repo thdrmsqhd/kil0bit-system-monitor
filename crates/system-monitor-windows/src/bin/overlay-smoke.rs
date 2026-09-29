@@ -265,26 +265,32 @@ mod windows_smoke {
         if unsafe { GetWindowRect(hwnd, &mut before) } == 0 {
             return Err("could not read overlay bounds before drag".into());
         }
-        let screen_dc = unsafe { GetDC(std::ptr::null_mut()) };
-        if screen_dc.is_null() {
-            return Err("could not inspect drag target pixels".into());
-        }
+        let center_x = (before.left + before.right) / 2;
+        let center_y = (before.top + before.bottom) / 2;
         let mut target = None;
-        'pixels: for y in before.top + 8..before.bottom - 8 {
-            for x in before.left + 8..before.right - 8 {
-                let pixel = unsafe { GetPixel(screen_dc, x, y) };
-                if pixel != u32::MAX
-                    && pixel & 0xff > 210
-                    && (pixel >> 8) & 0xff > 210
-                    && (pixel >> 16) & 0xff > 210
-                    && unsafe { WindowFromPoint(Point { x, y }) } == hwnd {
-                    target = Some((x, y));
-                    break 'pixels;
+        for radius in (0..(before.right - before.left).max(before.bottom - before.top)).step_by(3) {
+            for y in (center_y - radius..=center_y + radius).step_by(3) {
+                if y < before.top || y >= before.bottom {
+                    continue;
+                }
+                for x in [center_x - radius, center_x + radius] {
+                    if x >= before.left
+                        && x < before.right
+                        && unsafe { WindowFromPoint(Point { x, y }) } == hwnd
+                    {
+                        target = Some((x, y));
+                        break;
+                    }
+                }
+                if target.is_some() {
+                    break;
                 }
             }
+            if target.is_some() {
+                break;
+            }
         }
-        unsafe { ReleaseDC(std::ptr::null_mut(), screen_dc) };
-        let (start_x, start_y) = target.ok_or("no visible overlay glyph accepts mouse input")?;
+        let (start_x, start_y) = target.ok_or("no overlay pixel accepts mouse input")?;
         if unsafe { SetCursorPos(start_x, start_y) } == 0 {
             return Err("could not move pointer onto overlay".into());
         }
