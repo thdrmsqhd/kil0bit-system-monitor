@@ -1,6 +1,9 @@
 //! Minimal Win32 layered-window PoT using the system ABI directly.
 //!
 //! No .NET runtime and no third-party native runtime are involved.
+//!
+//! Function bodies are split across win32_p*.rs (include!) so large updates
+//! stay under per-file upload limits while compiling as one module.
 
 use std::ffi::c_void;
 use std::fmt;
@@ -459,6 +462,11 @@ impl fmt::Display for WinError {
 }
 impl std::error::Error for WinError {}
 
-include!("win32_part0.rs");
-include!("win32_part1.rs");
-include!("win32_part2.rs");
+include!("win32_p0_0.rs");
+include!("win32_p0_1.rs");
+include!("win32_p0_2.rs");
+include!("win32_p1_0.rs");
+include!("win32_p1_1.rs");
+include!("win32_p1_2.rs");
+include!("win32_p2_0.rs");
+include!("win32_p2_1.rs");
