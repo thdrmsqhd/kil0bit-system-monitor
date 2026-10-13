@@ -1,6 +1,6 @@
 # Rust port status and use
 
-> **상태 (2026-09-29): 진행 중이며 완료되지 않았습니다.** 최신 완료 Windows CI의 포맷·Clippy·테스트·릴리스 빌드·패키지 생성은 통과했지만, Win32 드래그 smoke는 실패했습니다. 상세 인수인계는 [`handoff-2026-09-29.md`](handoff-2026-09-29.md)를 참고하세요.
+> **상태 (2026-10-13): 진행 중이며 완료되지 않았습니다.** CI는 포맷·Clippy·테스트·MSVC 릴리스 빌드·포터블 패키지만 돌립니다. Win32 오버레이 드래그 등 GUI 수용은 Windows 11 로컬 체크리스트로 옮겼습니다. 상세 인수인계는 [`handoff-2026-09-29.md`](handoff-2026-09-29.md)를 참고하세요.
 
 This fork keeps the upstream C# application as its source reference and develops a separate native Rust implementation. Work happens on `rust/phase-0`; `main` remains the upstream synchronization branch. The original project files and installation are not modified by the Rust application.
 
@@ -18,14 +18,26 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --workspace --release --target x86_64-pc-windows-msvc
 cargo run -p system-monitor-core --bin package_port -- target/x86_64-pc-windows-msvc/release/system-monitor-windows.exe rust-port-package
+cargo run --release -p system-monitor-windows
 ```
 
 The output directory contains the Rust executable, the MIT license, and a short portable-use note. No original executable or managed runtime is copied into it.
 
+## CI policy (2026-10-13)
+
+GitHub Actions `windows-2022` runs format, Clippy, unit tests, MSVC release build, and portable package upload only. The previous Win32 layered-window smoke step (including injected drag via `SendInput`) was removed: headless Server 2022 could not reliably deliver mouse input to a layered overlay, and repeated failures burned free runner minutes. GUI acceptance evidence must come from a real Windows 11 interactive session using [`evidence/p1-windows-run-checklist.md`](evidence/p1-windows-run-checklist.md).
+
+Optional local smoke (not a CI gate):
+
+```powershell
+cargo build --workspace --release --target x86_64-pc-windows-msvc
+.\target\x86_64-pc-windows-msvc\release\overlay-smoke.exe .\target\x86_64-pc-windows-msvc\release\system-monitor-windows.exe
+```
+
 ## Current implementation checkpoint
 
-Implemented: layered Win32 overlay, native context menu, startup mode and per-user startup registration, single-instance activation, taskbar snap/free placement, lock, position persistence, DPI scaling, settings controls for metric visibility/compact mode and OpenCode/Codex usage, DPAPI key storage, OpenCode Go polling, read-only Codex auth parsing/polling, DeepSeek balance client/parser, CPU/RAM/network sampling, disk capacity sampling, and a Windows hosted smoke harness.
+Implemented: layered Win32 overlay, native context menu, startup mode and per-user startup registration, single-instance activation, taskbar snap/free placement, lock, position persistence, DPI scaling, settings controls for metric visibility/compact mode and OpenCode/Codex usage, DPAPI key storage, OpenCode Go polling, read-only Codex auth parsing/polling, DeepSeek balance client/parser, CPU/RAM/network sampling, disk capacity and activity sampling, NVIDIA/AMD/D3DKMT GPU sample paths, and packaging.
 
-Still incomplete: full original settings/dashboard parity, per-drive activity and selection, GPU vendor providers, fullscreen fade/debounce and multi-monitor behavior (current hide check only compares the foreground window to primary-screen bounds), full theme/color/font system, DeepSeek balance UI wiring, Zen credit display, package/install upgrades and broad Windows 11 multi-monitor/hardware validation. Catalog results must stay `NOT_RUN` or `BLOCKED` until their stated checks actually pass. The upstream executable is never built or run; runtime old-vs-new comparison therefore remains `RUNTIME_DIFF_NOT_RUN`.
+Still incomplete: full original settings/dashboard parity, GPU device name/LUID selection mapping beyond vendor+index, fullscreen fade/debounce and multi-monitor behavior, full theme/color/font system, DeepSeek balance UI wiring, Zen credit display, package/install upgrades, and broad Windows 11 multi-monitor/hardware validation. Catalog results must stay `NOT_RUN` or `BLOCKED` until their stated checks actually pass. The upstream executable is never built or run; runtime old-vs-new comparison therefore remains `RUNTIME_DIFF_NOT_RUN`.
 
 See [`original-feature-catalog.md`](original-feature-catalog.md), [`implementation-plan.md`](implementation-plan.md), and [`function-task-breakdown.md`](function-task-breakdown.md) for requirements and verification scope.
