@@ -1,11 +1,13 @@
-# Phase 1 PoT: Windows run checklist
+# Phase 1 PoT: Windows 11 local run checklist
 
 This PoT exercises only the Rust binary. It does not build or launch the original application and does not call .NET.
+
+**Policy (2026-10-13):** GitHub Actions no longer runs the Win32 layered-window smoke step. Format, Clippy, tests, MSVC release build, and portable packaging remain in CI. All GUI acceptance (drag, lock, snap, DPI, menu/Settings) is verified only on a real Windows 11 interactive session using this checklist. Do not treat Server 2022 CI results as Windows 11 evidence.
 
 ## Host requirements
 
 - Windows 11 x64
-- Rust stable toolchain from `rust-toolchain.toml`
+- Rust stable toolchain (see `rust-toolchain.toml` if present)
 - Visual Studio 2022 C++ Build Tools (MSVC linker)
 
 ## Commands
@@ -17,33 +19,46 @@ rustc --version
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo build --workspace --release --target x86_64-pc-windows-msvc
 cargo run --release -p system-monitor-windows
 ```
 
-## Expected result
+Optional local smoke harness (not a CI gate; may fail on drag under some environments):
 
-1. A borderless dark blue-gray capsule appears near horizontal coordinate 100 and is vertically centered on the primary taskbar by default, with white `RUST` bitmap text. Choosing **Free Position** starts from the saved free X/Y (initially 100, 100).
-2. Pixels outside the capsule remain transparent; desktop content is visible around it.
-3. The capsule is above ordinary windows and has no taskbar button.
-4. Dragging the capsule moves it while unlocked.
-5. Right-click and choose **Lock Position**; dragging no longer moves it. Choose **Unlock Position** and verify dragging works again.
-6. Right-click and toggle **Snap to Taskbar**; the capsule should center vertically against the primary taskbar. Toggle **Free Position** and confirm its prior free X/Y returns. Drag to a new free position, exit, relaunch, and confirm the position is restored.
-7. Right-click → **Settings**; click **Toggle overlay accent** and confirm the capsule changes color live. Close the Settings window.
-8. Move between monitors with different Windows scale factors. Confirm the capsule scales and stays visible; repeat with snap enabled and disabled.
-9. Right-click and choose **Exit PoT**. The process exits and no overlay window remains.
-10. Repeating the launch works again, showing class/window resources are released.
+```powershell
+.\target\x86_64-pc-windows-msvc\release\overlay-smoke.exe .\target\x86_64-pc-windows-msvc\release\system-monitor-windows.exe
+```
 
-Capture evidence showing the capsule and desktop visible around its transparent corners. Record Windows version, display scale, compiler version, and any build/runtime error. The Linux checks validate the software-generated premultiplied BGRA surface and Win32 FFI type-checking only. Windows CI on Server 2022 already proves visible layered HWND creation, menu/Settings opening, and clean shutdown; Windows 11-specific taskbar, DPI, drag/lock, screenshot, and resource checks remain open. Record startup time from launch to first visible capsule and process working set after launch for the renderer/UI-toolkit comparison in ADR-001.
-# Automated verification attempt (2026-09-28)
+Prefer the manual steps below for acceptance. Record pass/fail per item; only mark `RUN_PASS` when the step succeeds on your machine.
 
-This section records the verification run performed on the Linux workspace host. No .NET command, runtime, or original executable was used.
+## Expected result (acceptance steps)
 
-- Rust stable 1.98.1: `cargo test --workspace --offline` passed (3 bitmap/scale unit tests); `cargo fmt --all -- --check` passed.
-- Windows MSVC target: workspace `cargo check` with warnings denied passed. This is target-aware Rust checking, not a native MSVC link or Windows run.
-- Windows GNU target: release build linked with MinGW. The output is a PE32+ x86-64 Windows GUI executable with the expected USER32/GDI32/SHELL32/KERNEL32 imports.
-- GUI execution: attempted with Wine 9 under Xvfb. Wine stopped before launching the app because `wineserver` could not create/use its socket (`Operation not permitted`) in the managed container. No overlay screenshot or interaction result is claimed.
-- The local Linux session therefore produced no GUI runtime result. A Windows-hosted CI smoke harness later passed layered HWND creation, native context menu and Settings opening, and clean shutdown. The current harness adds a desktop-composited glyph-pixel assertion; its first successful run is still pending. The steps below record the remaining interaction and visual acceptance checks that the smoke harness does not cover.
+1. **Launch / visible capsule** — A borderless dark blue-gray capsule appears near horizontal coordinate 100 and is vertically centered on the primary taskbar by default, with white `RUST` bitmap text. Choosing **Free Position** starts from the saved free X/Y (initially 100, 100).
+2. **Transparency** — Pixels outside the capsule remain transparent; desktop content is visible around it.
+3. **Z-order / taskbar** — The capsule is above ordinary windows and has no taskbar button.
+4. **Drag (unlocked)** — Dragging the capsule moves it while unlocked. **This is the primary gate that CI could not prove.**
+5. **Lock / unlock** — Right-click → **Lock Position**; dragging no longer moves it. **Unlock Position** and verify dragging works again.
+6. **Snap / free + persistence** — Right-click → toggle **Snap to Taskbar**; the capsule centers vertically against the primary taskbar. Toggle **Free Position** and confirm prior free X/Y returns. Drag to a new free position, exit, relaunch, and confirm the position is restored.
+7. **Settings** — Right-click → **Settings**; click **Toggle overlay accent** and confirm the capsule changes color live. Close the Settings window.
+8. **Multi-monitor / DPI** — Move between monitors with different Windows scale factors. Confirm the capsule scales and stays visible; repeat with snap enabled and disabled.
+9. **Exit** — Right-click → **Exit PoT**. The process exits and no overlay window remains.
+10. **Relaunch** — Launch again works, showing class/window resources are released.
 
-## Automated Windows runner smoke test
+## Evidence to capture
 
-The feature branch now has a Rust-only GitHub Actions job on `windows-2022`. It runs format, Clippy, tests, MSVC release build, then launches the overlay PoT with `overlay-smoke.exe`. Run `36403912188` confirmed a visible `WS_EX_LAYERED` HWND (192×52), read the rendered white glyph from the desktop DC as `#f2f2f2`, clicked Settings in the native context menu, confirmed the Settings HWND was visible, and observed clean process shutdown. This proves actual Windows compositing at the sampled pixel; it is not a saved screenshot or a complete visual inspection. Run `36405034921` additionally passed the taskbar center/snap/free checks and unlocked/locked/unlocked drag sequence. Restart persistence, the Settings button's visual effect, multi-monitor/DPI behavior, and overall appearance remain separate acceptance checks.
+- Screenshot of the capsule with desktop visible through transparent corners
+- Windows version, display scale(s), compiler/`rustc` version
+- Startup time (launch → first visible capsule) and process working set after launch (for ADR-001)
+- Pass/fail note per step 1–10; failures with short description
+
+Store notes under `docs/rust-port/evidence/` when updating Phase 1 status in `traceability.md` / `task-breakdown.md`.
+
+## Historical notes (not acceptance criteria)
+
+### Linux workspace attempt (2026-09-28)
+
+- `cargo test --workspace --offline` and `cargo fmt` passed on Linux; no GUI result (Wine/Xvfb could not run the overlay).
+
+### Former Windows CI smoke (removed 2026-10-13)
+
+- `windows-2022` previously ran `overlay-smoke.exe`. Some runs confirmed layered HWND, glyph pixel, menu/Settings, and clean shutdown. Injected drag via `SendInput` repeatedly failed and burned runner minutes; the step was removed from `.github/workflows/rust.yml`. Keep those logs as historical context only—not as current Windows 11 acceptance.
