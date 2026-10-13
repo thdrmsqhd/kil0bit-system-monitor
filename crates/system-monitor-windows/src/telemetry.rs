@@ -3,12 +3,14 @@
 //! turn an unrelated adapter's lifetime byte count into a transfer-rate spike.
 
 use std::collections::HashMap;
-use std::time::Instant;
 use std::time::Duration;
+use std::time::Instant;
 use sysinfo::{Disks, Networks, System};
 use system_monitor_core::{
     bytes_per_second_to_kib, format_network_rate, DiskMetric, SystemMetrics,
 };
+
+use super::gpu::{self, GpuSelection, GpuVendor};
 
 pub struct TelemetryCollector {
     system: System,
@@ -20,6 +22,8 @@ pub struct TelemetryCollector {
     gpu_counters: Option<super::pdh::CounterGroup>,
     last_counter_probe: Instant,
     last_disk_names: Vec<String>,
+    cached_gpu_devices: Vec<gpu::GpuDevice>,
+    last_gpu_enum: Instant,
 }
 
 impl TelemetryCollector {
@@ -39,7 +43,30 @@ impl TelemetryCollector {
             gpu_counters: super::pdh::CounterGroup::new("\\GPU Engine(*)\\Utilization Percentage"),
             last_counter_probe: Instant::now(),
             last_disk_names: Vec::new(),
+            cached_gpu_devices: Vec::new(),
+            last_gpu_enum: Instant::now()
+                .checked_sub(Duration::from_secs(60))
+                .unwrap_or_else(Instant::now),
         }
+    }
+
+    fn refresh_gpu_devices_if_needed(&mut self) {
+        if self.last_gpu_enum.elapsed() < Duration::from_secs(30) && !self.cached_gpu_devices.is_empty()
+        {
+            return;
+        }
+        let instances: Vec<String> = self
+            .gpu_counters
+            .as_ref()
+            .map(|group| group.sample().into_iter().map(|(name, _)| name).collect())
+            .unwrap_or_default();
+        self.cached_gpu_devices = gpu::enumerate_gpus(&instances);
+        self.last_gpu_enum = Instant::now();
+    }
+
+    pub fn gpu_devices(&mut self) -> &[gpu::GpuDevice] {
+        self.refresh_gpu_devices_if_needed();
+        &self.cached_gpu_devices
     }
 
     /// Poll one immutable metrics sample. A first network sample has zero rate because there is
@@ -50,14 +77,23 @@ impl TelemetryCollector {
         self.system.refresh_memory();
         self.networks.refresh(true);
         self.disks.refresh(true);
-        let mut disk_names: Vec<_> = self.disks.iter()
-            .map(|disk| disk.mount_point().to_string_lossy().into_owned()).collect();
+        let mut disk_names: Vec<_> = self
+            .disks
+            .iter()
+            .map(|disk| disk.mount_point().to_string_lossy().into_owned())
+            .collect();
         disk_names.sort();
-        if disk_names != self.last_disk_names || now.duration_since(self.last_counter_probe) >= Duration::from_secs(30) {
+        if disk_names != self.last_disk_names
+            || now.duration_since(self.last_counter_probe) >= Duration::from_secs(30)
+        {
             self.disk_counters = super::pdh::CounterGroup::new("\\PhysicalDisk(*)\\% Disk Time");
-            self.gpu_counters = super::pdh::CounterGroup::new("\\GPU Engine(*)\\Utilization Percentage");
+            self.gpu_counters =
+                super::pdh::CounterGroup::new("\\GPU Engine(*)\\Utilization Percentage");
             self.last_disk_names = disk_names;
             self.last_counter_probe = now;
+            self.last_gpu_enum = now
+                .checked_sub(Duration::from_secs(60))
+                .unwrap_or(now);
         }
         let mut up = 0.0;
         let mut down = 0.0;
@@ -150,34 +186,45 @@ impl TelemetryCollector {
         } else {
             used_space as f32 / total_space as f32 * 100.0
         };
+
+        self.refresh_gpu_devices_if_needed();
+        let selection = gpu::resolve_selection(
+            &config.gpu_adapter,
+            config.gpu_index,
+            &self.cached_gpu_devices,
+        );
+
         let gpu = if config.show_gpu || config.show_temp {
-            let vendor = config.gpu_adapter.to_ascii_lowercase();
-            if vendor.contains("amd") || vendor.contains("radeon") {
-                super::gpu::sample_amd(config.gpu_index as usize)
-            } else if vendor.contains("nvidia") || vendor.contains("geforce") {
-                super::gpu::sample_nvidia(config.gpu_index as usize)
-            } else if vendor == "default" {
-                super::gpu::sample_nvidia(config.gpu_index as usize)
-                    .or_else(|| super::gpu::sample_amd(config.gpu_index as usize))
-            } else {
-                None
-            }
+            sample_vendor(&selection)
         } else {
             None
         };
+
         let gpu_samples = if config.show_gpu || config.show_temp {
-            self.gpu_counters.as_ref().map(|group| group.sample()).unwrap_or_default()
-        } else { Vec::new() };
+            self.gpu_counters
+                .as_ref()
+                .map(|group| group.sample())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         let selected_gpu = gpu_samples.iter().filter(|(name, _)| {
-            name.to_ascii_lowercase()
-                .split("_phys_").nth(1)
-                .and_then(|tail| tail.split('_').next())
-                .and_then(|index| index.parse::<u32>().ok()) == Some(config.gpu_index)
+            if let Some(ref luid) = selection.luid {
+                name.to_ascii_lowercase().contains(luid)
+            } else {
+                gpu::parse_phys_index_from_instance(name) == Some(selection.index)
+            }
         });
         let fallback_gpu = selected_gpu.clone().map(|(_, usage)| *usage).reduce(f32::max);
-        let gpu_temperature_c = gpu.as_ref().and_then(|v| v.temperature_c)
-            .or_else(|| selected_gpu.clone()
-                .find_map(|(name, _)| super::gpu::sample_d3dkmt_temperature(name)));
+        let gpu_temperature_c = gpu
+            .as_ref()
+            .and_then(|v| v.temperature_c)
+            .or_else(|| {
+                selected_gpu
+                    .clone()
+                    .find_map(|(name, _)| gpu::sample_d3dkmt_temperature(name))
+            });
         let disk_usage_percent = disk_metrics
             .iter()
             .map(|disk| disk.activity_percent)
@@ -218,6 +265,16 @@ impl TelemetryCollector {
     }
 }
 
+fn sample_vendor(selection: &GpuSelection) -> Option<gpu::GpuReading> {
+    match selection.vendor {
+        GpuVendor::Amd => gpu::sample_amd(selection.index as usize),
+        GpuVendor::Nvidia => gpu::sample_nvidia(selection.index as usize),
+        GpuVendor::Other => None,
+        GpuVendor::Unknown => gpu::sample_nvidia(selection.index as usize)
+            .or_else(|| gpu::sample_amd(selection.index as usize)),
+    }
+}
+
 impl Default for TelemetryCollector {
     fn default() -> Self {
         Self::new()
@@ -228,7 +285,8 @@ pub(crate) fn is_eligible_adapter(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     !lower.contains('*')
         && !["loopback", "tunnel", "pseudo", "filter", "packet scheduler", "wfp", "qos", "native mac layer"]
-            .iter().any(|excluded| lower.contains(excluded))
+            .iter()
+            .any(|excluded| lower.contains(excluded))
 }
 
 #[cfg(test)]
