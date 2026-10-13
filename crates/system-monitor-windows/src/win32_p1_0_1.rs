@@ -28,51 +28,87 @@ unsafe fn open_devices_window(owner: Hwnd) {
         WS_VSCROLL | WS_TABSTOP | 0x0003);
     NETWORK_COMBO.store(combo, Ordering::Relaxed);
     let mut networks = vec!["Default".to_owned()];
-    if let Ok(choices) = NETWORK_CHOICES.get_or_init(|| Mutex::new(Vec::new())).lock() {
-        networks.extend(choices.iter().cloned());
-    }
-    for (index, name) in networks.iter().enumerate() {
+    networks.extend(sysinfo::Networks::new_with_refreshed_list().keys()
+        .filter(|name| super::telemetry::is_eligible_adapter(name)).cloned());
+    networks.sort();
+    networks.dedup();
+    let selected_network = networks.iter().position(|name| *name == config.network_adapter)
+        .unwrap_or_else(|| networks.iter().position(|name| name == "Default").unwrap_or(0));
+    for name in &networks {
         let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         SendMessageW(combo, 0x0143, 0, wide.as_ptr() as isize);
-        if config.network_adapter.as_deref() == Some(name.as_str()) || (index == 0 && config.network_adapter.is_none()) {
-            SendMessageW(combo, 0x014E, index, 0);
-        }
     }
-    devices_child(window, "STATIC", "Disks to monitor", 0, 20, 90, 470, 24, 0);
-    let list = devices_child(window, "LISTBOX", "", 0, 20, 120, 465, 120,
+    SendMessageW(combo, 0x014E, selected_network, 0);
+    *NETWORK_CHOICES.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap() = networks;
+    devices_child(window, "STATIC", "Disk volumes", 0, 20, 95, 470, 24, 0);
+    let list = devices_child(window, "LISTBOX", "", 0, 20, 125, 465, 140,
         WS_VSCROLL | WS_TABSTOP | 0x0001 | 0x0080);
     DISK_LIST.store(list, Ordering::Relaxed);
     let mut disks = Vec::new();
-    if let Ok(choices) = DISK_CHOICES.get_or_init(|| Mutex::new(Vec::new())).lock() {
-        disks.extend(choices.iter().cloned());
-    }
+    disks.extend(sysinfo::Disks::new_with_refreshed_list().list().iter()
+        .filter_map(|disk| disk.mount_point().to_str().map(str::to_owned)));
+    disks.sort();
+    disks.dedup();
     for name in &disks {
         let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         let index = SendMessageW(list, 0x0180, 0, wide.as_ptr() as isize);
-        if config.monitored_disks.iter().any(|d| d == name) {
+        if config.disk_volumes.iter().any(|volume| volume == name) {
             SendMessageW(list, 0x0185, 1, index);
         }
     }
-    devices_child(window, "STATIC", "GPU index", 0, 20, 260, 200, 24, 0);
-    let gpu_edit = devices_child(window, "EDIT", &config.gpu_index.to_string(), 0,
-        20, 290, 100, 28, WS_BORDER | WS_TABSTOP);
-    GPU_INDEX_EDIT.store(gpu_edit, Ordering::Relaxed);
-    devices_child(window, "STATIC", "GPU vendor", 0, 150, 260, 200, 24, 0);
-    let vendor_combo = devices_child(window, "COMBOBOX", "", 0, 150, 290, 200, 180,
-        WS_VSCROLL | WS_TABSTOP | 0x0003);
-    GPU_VENDOR_COMBO.store(vendor_combo, Ordering::Relaxed);
-    let vendors = ["Auto", "NVIDIA", "AMD", "Intel"];
-    for (i, v) in vendors.iter().enumerate() {
-        let wide: Vec<u16> = v.encode_utf16().chain(Some(0)).collect();
-        SendMessageW(vendor_combo, 0x0143, 0, wide.as_ptr() as isize);
-        if config.gpu_vendor.as_deref() == Some(*v) || (i == 0 && config.gpu_vendor.is_none()) {
-            SendMessageW(vendor_combo, 0x014E, i, 0);
+    *DISK_CHOICES.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap() = disks;
+    devices_child(window, "STATIC", "GPU adapter", 0, 20, 285, 300, 24, 0);
+    let gpu_vendor_combo = devices_child(window, "COMBOBOX", "", 0,
+        20, 315, 290, 200, WS_VSCROLL | WS_TABSTOP | 0x0003);
+    GPU_VENDOR_COMBO.store(gpu_vendor_combo, Ordering::Relaxed);
+    let mut vendors = vec!["Auto".to_owned()];
+    if let Ok(engines) = super::pdh::list_gpu_engine_instances() {
+        let engine_names: Vec<String> = engines.into_iter().map(|(_, name)| name).collect();
+        for device in super::gpu::enumerate_gpus(&engine_names) {
+            if !vendors.iter().any(|name| name.eq_ignore_ascii_case(&device.name)) {
+                vendors.push(device.name);
+            }
         }
     }
-    devices_child(window, "BUTTON", "Save devices", DEVICES_SAVE,
-        20, 340, 150, 34, WS_TABSTOP);
+    if !vendors.iter().any(|name| name == &config.gpu_adapter) {
+        vendors.push(config.gpu_adapter.clone());
+    }
+    let vendor_index = vendors.iter().position(|name| name == &config.gpu_adapter).unwrap_or(0);
+    for vendor in &vendors {
+        let wide: Vec<u16> = vendor.encode_utf16().chain(Some(0)).collect();
+        SendMessageW(gpu_vendor_combo, 0x0143, 0, wide.as_ptr() as isize);
+    }
+    SendMessageW(gpu_vendor_combo, 0x014E, vendor_index, 0);
+    *GPU_VENDOR_CHOICES.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap() = vendors;
+    devices_child(window, "STATIC", "Index", 0, 325, 285, 50, 24, 0);
+    let edit = devices_child(window, "EDIT", &config.gpu_index.to_string(), 0,
+        390, 283, 95, 28, WS_BORDER | WS_TABSTOP);
+    GPU_INDEX_EDIT.store(edit, Ordering::Relaxed);
+    devices_child(window, "STATIC", "Telemetry refresh", 0,
+        20, 330, 180, 24, 0);
+    let interval = devices_child(window, "COMBOBOX", "", 0,
+        205, 328, 175, 120, WS_VSCROLL | WS_TABSTOP | 0x0003);
+    for caption in ["0.5 seconds", "1 second", "2 seconds", "5 seconds"] {
+        let wide: Vec<u16> = caption.encode_utf16().chain(Some(0)).collect();
+        SendMessageW(interval, 0x0143, 0, wide.as_ptr() as isize);
+    }
+    let interval_index = [500, 1000, 2000, 5000]
+        .iter().position(|value| *value == config.update_interval_ms).unwrap_or(1);
+    SendMessageW(interval, 0x014E, interval_index, 0);
+    UPDATE_COMBO.store(interval, Ordering::Relaxed);
+    for (index, (caption, checked)) in [
+        ("Hide in fullscreen", config.hide_on_fullscreen),
+        ("Show disk activity", config.show_disk_speed),
+    ].iter().enumerate() {
+        let control = devices_child(window, "BUTTON", caption, 0,
+            20 + index as i32 * 225, 385, 220, 25, WS_TABSTOP | 0x0003);
+        DEVICE_CHECKS[index].store(control, Ordering::Relaxed);
+        if *checked { SendMessageW(control, BM_SETCHECK, BST_CHECKED, 0); }
+    }
+    devices_child(window, "BUTTON", "Save selection", DEVICES_SAVE,
+        20, 440, 175, 36, WS_TABSTOP);
     devices_child(window, "BUTTON", "Appearance...", DEVICES_APPEARANCE,
-        190, 340, 150, 34, WS_TABSTOP);
+        215, 440, 175, 36, WS_TABSTOP);
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
 }
